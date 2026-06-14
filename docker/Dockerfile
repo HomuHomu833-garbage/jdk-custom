@@ -25,7 +25,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates aria2 xz-utils unzip zip p7zip-full git make autoconf \
         build-essential clang lld file cpio bzip2 python3 cmake \
-        libxml2-dev liblzma-dev uuid-dev zlib1g-dev libssl-dev \
+        libasound2-dev libxml2-dev liblzma-dev uuid-dev zlib1g-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # fetch: aria2c with retries (transient GitHub/Adoptium 5xx). build scripts reuse it.
