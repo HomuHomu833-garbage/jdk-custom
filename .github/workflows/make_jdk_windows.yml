@@ -1,0 +1,25 @@
+name: Make JDK (Windows)
+run-name: Make JDK ${{ inputs.jdk_version }} (Windows)
+on:
+  workflow_dispatch:
+    inputs:
+      jdk_version:
+        description: "OpenJDK feature version (8 | 11 | 17 | 21 | 25)"
+        required: true
+        default: "25"
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  make:
+    uses: ./.github/workflows/make-jdk.yml
+    secrets: inherit
+    with:
+      platform: windows
+      jdk_version: ${{ inputs.jdk_version }}
+      # Experimental: upstream OpenJDK officially targets MSVC. The llvm-mingw
+      # path leans on the fixups under patches/global/jdk and patches/windows.
+      targets: >-
+        ["x86_64-w64-mingw32", "aarch64-w64-mingw32"]

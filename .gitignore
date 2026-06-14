@@ -1,0 +1,16 @@
+# build artifacts / fetched sources — anchored to repo root so scripts/*.sh
+# (and any nested paths) stay tracked.
+/build
+/install
+/jdk-src
+/jdk-*
+/boot-jdk
+/boot-jdk-*
+/build-jdk
+/android-ndk-r*
+/zig-as-llvm
+# packaged archives
+/*.tar.xz
+/*.7z
+# remove git history helper
+git_remove_history.sh

@@ -1,0 +1,24 @@
+name: Make JDK (macOS)
+run-name: Make JDK ${{ inputs.jdk_version }} (macOS)
+on:
+  workflow_dispatch:
+    inputs:
+      jdk_version:
+        description: "OpenJDK feature version (8 | 11 | 17 | 21 | 25)"
+        required: true
+        default: "25"
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  make:
+    uses: ./.github/workflows/make-jdk.yml
+    secrets: inherit
+    with:
+      platform: macos
+      jdk_version: ${{ inputs.jdk_version }}
+      # osxcross stands in for Xcode; the SDK is baked into the builder image.
+      targets: >-
+        ["x86_64-apple-darwin", "arm64-apple-darwin"]

@@ -1,0 +1,34 @@
+name: Make JDK (Linux)
+run-name: Make JDK ${{ inputs.jdk_version }} (Linux)
+on:
+  workflow_dispatch:
+    inputs:
+      jdk_version:
+        description: "OpenJDK feature version (8 | 11 | 17 | 21 | 25)"
+        required: true
+        default: "25"
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  make:
+    uses: ./.github/workflows/make-jdk.yml
+    secrets: inherit
+    with:
+      platform: linux
+      jdk_version: ${{ inputs.jdk_version }}
+      # HotSpot "server" arches get the JIT; the rest fall back to Zero in
+      # build.sh. Zero-only extras you can add: aarch64_be-linux-gnu,
+      # armeb-linux-musleabihf, mips64el-linux-musl, powerpc-linux-musl,
+      # riscv32-linux-musl, hexagon-linux-musl
+      targets: >-
+        ["x86_64-linux-gnu", "x86_64-linux-musl",
+         "aarch64-linux-gnu", "aarch64-linux-musl",
+         "arm-linux-gnueabihf", "arm-linux-musleabihf",
+         "riscv64-linux-gnu", "riscv64-linux-musl",
+         "powerpc64le-linux-gnu", "powerpc64le-linux-musl",
+         "s390x-linux-gnu", "s390x-linux-musl",
+         "x86-linux-gnu", "x86-linux-musl",
+         "loongarch64-linux-gnu", "loongarch64-linux-musl"]
