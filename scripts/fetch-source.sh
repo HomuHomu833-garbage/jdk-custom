@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Thin wrapper: resolve the GA build tag for a Temurin feature release, fetch
-# that source from the matching adoptium/jdk<N>u repo, download the Temurin JDK we
-# use as the boot + interim build JDK, and apply the global (+ per-patchset)
+# Thin wrapper: resolve the OpenJDK GA build tag from the Azul Zulu API, fetch
+# that source from the matching openjdk/jdk<N>u repo, download the Azul Zulu JDK
+# we use as the boot + interim build JDK, and apply the global (+ per-patchset)
 # patches. No state file is written — build.sh recomputes the same paths from
 # $ROOTDIR and reads JDK_VERSION from the env, like the sibling repos.
 #
 #   JDK_VERSION   required feature version: 8 | 11 | 17 | 21 | 25
 #   JDK_TAG       optional exact source tag (e.g. jdk-21.0.5+11, jdk8u432-b06);
-#                 when unset it is resolved from the Adoptium GA feed
+#                 when unset it is resolved from the Azul Zulu API
 #   BOOT_JDK_VERSION optional boot feature (default: same as JDK_VERSION; OpenJDK
 #                 builds feature N with a boot JDK of N or N-1)
 #   PLATFORM      optional (linux|bsd|windows|macos|android); picks the default
@@ -43,7 +43,7 @@ BOOT_JDK="${BOOT_JDK:-$ROOTDIR/boot-jdk}"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
-# Download with retries: re-run aria2c on any failure so transient GitHub/Adoptium
+# Download with retries: re-run aria2c on any failure so transient GitHub/Azul
 # 501/504 (and the like) recover, without relying on aria2's --retry-on-unknown
 # (older aria2 builds lack it). Pass aria2c args, e.g. --dir=/tmp -o f.zip URL.
 fetch() {
@@ -55,22 +55,27 @@ fetch() {
   done
 }
 
-# Source = the Temurin tree: adoptium/jdk<N>u mirrors the matching OpenJDK update
-# line and carries the same upstream tags plus Adoptium's own commits, so what we
-# build here is Temurin's source rather than vanilla OpenJDK. 8 keeps the legacy
-# "jdk8u" naming and the old build system. Override JDK_REPO to build elsewhere.
-JDK_REPO="${JDK_REPO:-https://github.com/adoptium/jdk${JDK_VERSION}u}"
+# Source = the upstream OpenJDK tree. Override JDK_REPO to build from a fork.
+JDK_REPO="${JDK_REPO:-https://github.com/openjdk/jdk${JDK_VERSION}u}"
 
-# Resolve the exact GA build tag from the Adoptium feed unless one was pinned.
-# release_name is the upstream git tag (jdk-21.0.5+11 / jdk8u432-b06), so we can
-# clone it directly. python3 is in the builder image; parse JSON with it rather
-# than depending on jq.
+# Resolve the exact GA build tag from the Azul Zulu API unless one was pinned.
+# The tag (jdk-21.0.5+11 / jdk8u432-b06) is the upstream OpenJDK git tag that
+# Azul ships in their latest GA release. python3 is in the builder image; parse
+# JSON with it rather than depending on jq.
 if [ -z "${JDK_TAG:-}" ]; then
-  log "Resolving latest GA tag for JDK $JDK_VERSION"
-  feed="https://api.adoptium.net/v3/assets/feature_releases/${JDK_VERSION}/ga?image_type=jdk&os=linux&architecture=x64&jvm_impl=hotspot&page_size=1&sort_order=DESC"
-  fetch --dir=/tmp -o adoptium-feed.json "$feed"
-  JDK_TAG="$(python3 -c 'import json,sys; print(json.load(open("/tmp/adoptium-feed.json"))[0]["release_name"])' < /dev/null)"
-  rm -f /tmp/adoptium-feed.json
+  log "Resolving latest GA tag for JDK $JDK_VERSION from Azul Zulu API"
+  feed="https://api.azul.com/zulu/download/community/v1.0/bundles/latest/?jdk_version=${JDK_VERSION}&os=linux&arch=x64&ext=tar.gz&bundle_type=jdk&release_status=ga"
+  fetch --dir=/tmp -o azul-feed.json "$feed"
+  JDK_TAG="$(python3 -c '
+import json
+d = json.load(open("/tmp/azul-feed.json"))
+v = d["jdk_version"]
+if v[0] == 8:
+    print(f"jdk8u{v[2]}-b{v[3]}")
+else:
+    print(f"jdk-{v[0]}.{v[1]}.{v[2]}+{v[3]}")
+' < /dev/null)"
+  rm -f /tmp/azul-feed.json
 fi
 [ -n "$JDK_TAG" ] || { echo "Failed to resolve a source tag for JDK $JDK_VERSION" >&2; exit 1; }
 log "OpenJDK source tag: $JDK_TAG"
@@ -85,15 +90,20 @@ fi
 # already leaves a .git here; re-init is harmless and covers the tarball path.
 git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1 || git init -q "$SRC"
 
-# --- boot / build JDK (Temurin) ---------------------------------------------
-# One Temurin x64 JDK serves as both the boot JDK and, for cross builds, the
+# --- boot / build JDK (Azul Zulu) ------------------------------------------
+# One Azul Zulu x64 JDK serves as both the boot JDK and, for cross builds, the
 # --with-build-jdk that runs the interim Java tools on the build host.
 if [ ! -x "$BOOT_JDK/bin/javac" ]; then
-  log "Downloading Temurin $BOOT_JDK_VERSION (boot + build JDK, linux x64)"
-  boot_url="https://api.adoptium.net/v3/binary/latest/${BOOT_JDK_VERSION}/ga/linux/x64/jdk/hotspot/normal/eclipse"
+  log "Downloading Azul Zulu $BOOT_JDK_VERSION (boot + build JDK, linux x64)"
+  # Resolve the download URL from the API (lets us use a plain CDN URL below).
+  boot_api="https://api.azul.com/zulu/download/community/v1.0/bundles/latest/?jdk_version=${BOOT_JDK_VERSION}&os=linux&arch=x64&ext=tar.gz&bundle_type=jdk&release_status=ga"
+  fetch --dir=/tmp -o azul-boot.json "$boot_api"
+  boot_url="$(python3 -c 'import json; print(json.load(open("/tmp/azul-boot.json"))["url"])' < /dev/null)"
+  rm -f /tmp/azul-boot.json
+  # Download & unpack
   fetch --dir="$ROOTDIR" -o boot-jdk.tar.gz "$boot_url"
   rm -rf "$BOOT_JDK"; mkdir -p "$BOOT_JDK"
-  # Temurin archives nest everything under one jdk-* dir; strip it.
+  # Azul Zulu archives nest everything under one zulu*-ca-jdk*/ dir; strip it.
   tar -xzf "$ROOTDIR/boot-jdk.tar.gz" -C "$BOOT_JDK" --strip-components=1
   rm -f "$ROOTDIR/boot-jdk.tar.gz"
 fi
