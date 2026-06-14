@@ -24,7 +24,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # clang/lld + lib*-dev/cpio/bzip2: build osxcross (cctools-port) at image time.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates aria2 xz-utils unzip zip p7zip-full git make autoconf \
-        build-essential clang lld file cpio bzip2 python3 \
+        build-essential clang lld file cpio bzip2 python3 cmake \
         libxml2-dev liblzma-dev uuid-dev zlib1g-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
