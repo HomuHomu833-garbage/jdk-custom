@@ -47,7 +47,7 @@ esac
 
 # --- per-platform toolchain -------------------------------------------------
 # Dispatch on PLATFORM (not the triple) so the toolchain is chosen explicitly.
-# CC/CXX are exported; AR/NM/STRIP/OBJCOPY are passed via --with-* flags
+# CC/CXX are exported; AR/NM/STRIP/OBJCOPY are passed as configure variables
 # because configure ignores them from the environment during cross-compilation
 # and looks for target-prefixed names instead. SYSROOT is left empty for the zig
 # wrappers (zig cc carries its own
@@ -61,7 +61,7 @@ case "$PLATFORM" in
     [ -d "$ROOTDIR/patches/zig" ] && cp -R "$ROOTDIR/patches/zig/." /opt/zig/ || true
     export ZIG_TARGET="$TARGET"
     export CC="$TC/bin/cc" CXX="$TC/bin/c++"
-    EXTRA_CONF+=(--with-ar="$TC/bin/ar" --with-nm="$TC/bin/nm" --with-strip="$TC/bin/strip" --with-objcopy="$TC/bin/objcopy")
+    EXTRA_CONF+=(AR="$TC/bin/ar" NM="$TC/bin/nm" STRIP="$TC/bin/strip" OBJCOPY="$TC/bin/objcopy")
     TARGET_OS=linux
     # musl links the JDK launchers fully static-libc; glibc keeps libc dynamic.
     case "$TARGET" in
@@ -75,7 +75,7 @@ case "$PLATFORM" in
     [ -d "$ROOTDIR/patches/zig" ] && cp -R "$ROOTDIR/patches/zig/." /opt/zig/ || true
     export ZIG_TARGET="$TARGET"
     export CC="$TC/bin/cc" CXX="$TC/bin/c++"
-    EXTRA_CONF+=(--with-ar="$TC/bin/ar" --with-nm="$TC/bin/nm" --with-strip="$TC/bin/strip" --with-objcopy="$TC/bin/objcopy")
+    EXTRA_CONF+=(AR="$TC/bin/ar" NM="$TC/bin/nm" STRIP="$TC/bin/strip" OBJCOPY="$TC/bin/objcopy")
     case "$(echo "$TARGET" | cut -d- -f2)" in
       freebsd) TARGET_OS=bsd ;;
       netbsd)  TARGET_OS=bsd ;;
@@ -88,7 +88,7 @@ case "$PLATFORM" in
     # mingw path is experimental and leans on the patches/global/jdk fixups.
     TC=/opt/llvm-mingw
     export CC="$TC/bin/${TARGET}-clang" CXX="$TC/bin/${TARGET}-clang++"
-    EXTRA_CONF+=(--with-ar="$TC/bin/${TARGET}-ar" --with-nm="$TC/bin/${TARGET}-nm" --with-strip="$TC/bin/${TARGET}-strip" --with-objcopy="$TC/bin/${TARGET}-objcopy")
+    EXTRA_CONF+=(AR="$TC/bin/${TARGET}-ar" NM="$TC/bin/${TARGET}-nm" STRIP="$TC/bin/${TARGET}-strip" OBJCOPY="$TC/bin/${TARGET}-objcopy")
     export RC="$TC/bin/${TARGET}-windres"
     TARGET_OS=windows
     ;;
@@ -108,7 +108,7 @@ case "$PLATFORM" in
     [ -n "$CCWRAP" ] || { echo "osxcross clang wrapper for $OSX_ARCH not found" >&2; exit 1; }
     HOST="$(basename "${CCWRAP%-clang}")"
     export CC="$TC/bin/${HOST}-clang" CXX="$TC/bin/${HOST}-clang++"
-    EXTRA_CONF+=(--with-ar="$TC/bin/${HOST}-ar" --with-nm="$TC/bin/${HOST}-nm" --with-strip="$TC/bin/${HOST}-strip")
+    EXTRA_CONF+=(AR="$TC/bin/${HOST}-ar" NM="$TC/bin/${HOST}-nm" STRIP="$TC/bin/${HOST}-strip")
     TARGET_OS=macosx
     SDKROOT="$(ls -d "$TC/SDK/MacOSX"*.sdk 2>/dev/null | head -n1 || true)"
     [ -n "$SDKROOT" ] && EXTRA_CONF+=(--with-sysroot="$SDKROOT")
@@ -130,7 +130,7 @@ case "$PLATFORM" in
     fi
     TC="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64"
     export CC="$TC/bin/${TARGET}${API}-clang" CXX="$TC/bin/${TARGET}${API}-clang++"
-    EXTRA_CONF+=(--with-toolchain-type=clang --with-ar="$TC/bin/llvm-ar" --with-nm="$TC/bin/llvm-nm" --with-strip="$TC/bin/llvm-strip" --with-objcopy="$TC/bin/llvm-objcopy")
+    EXTRA_CONF+=(--with-toolchain-type=clang AR="$TC/bin/llvm-ar" NM="$TC/bin/llvm-nm" STRIP="$TC/bin/llvm-strip" OBJCOPY="$TC/bin/llvm-objcopy")
     TARGET_OS=linux
     ;;
   *) echo "Unknown/unsupported PLATFORM='$PLATFORM'" >&2; exit 1 ;;
