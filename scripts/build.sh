@@ -153,6 +153,7 @@ common_conf=(
   --disable-warnings-as-errors
   --enable-headless-only
   --with-toolchain-type=clang
+  --with-build-toolchain-type=gcc
   --with-vendor-name=jdk-custom
   --with-vendor-url=https://github.com/HomuHomu833/jdk-custom
   --with-build-user=builder
