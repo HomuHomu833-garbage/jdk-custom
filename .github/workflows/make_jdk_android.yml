@@ -29,8 +29,5 @@ jobs:
       jdk_version: ${{ inputs.jdk_version }}
       ndk_version: ${{ inputs.ndk_version }}
       ndk_revision: ${{ inputs.ndk_revision }}
-      # bionic has no HotSpot port, so every Android target is built as Zero
-      # (runnable on-device, e.g. Termux). riscv64-linux-android can be added.
-      targets: >-
-        ["aarch64-linux-android", "armv7a-linux-androideabi",
-         "x86_64-linux-android", "i686-linux-android"]
+      # riscv64-linux-android
+      targets: '["aarch64-linux-android", "armv7a-linux-androideabi", "i686-linux-android", "x86_64-linux-android"]'
