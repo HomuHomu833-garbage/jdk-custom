@@ -181,7 +181,6 @@ if [ "$JDK_VERSION" = 8 ]; then
     --disable-debug-symbols \
     --disable-warnings-as-errors \
     --enable-unlimited-crypto \
-    --with-vendor-name=jdk-custom \
     --with-build-user=builder \
     "${EXTRA_CONF[@]}"
   CONF8="$(ls -d "$SRC"/build/*/ 2>/dev/null | head -n1)"
