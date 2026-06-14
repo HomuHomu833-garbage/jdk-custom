@@ -35,10 +35,12 @@ fi
 # everything else falls back to the portable Zero interpreter so the build still
 # yields a runnable JDK. loongarch64 has an upstream HotSpot port from 21 on.
 case "$ARCH" in
-  x86_64|x86|aarch64|arm|armhf|armv7a|powerpc64|powerpc64le|ppc64|ppc64le|s390x|riscv64)
+  aarch64|aarch64_be|arm|arm64|arm64e|armeb|armhf|armv7a|i686|powerpc64|powerpc64le|ppc64|ppc64le|riscv64|s390x|thumb|thumbeb|x86|x86_64|x86_64h)
     JVM_VARIANT=server ;;
   loongarch64)
     if [ "$JDK_VERSION" -ge 21 ] 2>/dev/null; then JVM_VARIANT=server; else JVM_VARIANT=zero; fi ;;
+  mips|mipsel|mips64|mips64el)
+    if [ "$JDK_VERSION" -le 15 ] 2>/dev/null; then JVM_VARIANT=server; else JVM_VARIANT=zero; fi ;;
   *)
     JVM_VARIANT=zero ;;
 esac
@@ -153,6 +155,7 @@ common_conf=(
   --enable-headless-only
   --with-vendor-name=jdk-custom
   --with-vendor-url=https://github.com/HomuHomu833/jdk-custom
+  --with-build-user=builder
   --with-freetype=bundled
   --with-libpng=bundled
   --with-giflib=bundled
@@ -178,6 +181,7 @@ if [ "$JDK_VERSION" = 8 ]; then
     --disable-warnings-as-errors \
     --enable-unlimited-crypto \
     --with-vendor-name=jdk-custom \
+    --with-build-user=builder \
     "${EXTRA_CONF[@]}"
   CONF8="$(ls -d "$SRC"/build/*/ 2>/dev/null | head -n1)"
   IMAGE_DIR="${CONF8%/}/images/j2sdk-image"
