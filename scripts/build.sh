@@ -119,7 +119,6 @@ case "$PLATFORM" in
     # (e.g. Termux). HotSpot has no bionic port, so every Android target is Zero.
     : "${NDK_VERSION:?set NDK_VERSION for the android build}"
     NDK_REVISION="${NDK_REVISION:-}"
-    JVM_VARIANT=zero
     API="${ANDROID_PLATFORM:-26}"; [ "$TARGET" = riscv64-linux-android ] && API=35
     NDK_NAME="android-ndk-r${NDK_VERSION}${NDK_REVISION}"
     NDK_DIR="$ROOTDIR/$NDK_NAME"
@@ -153,6 +152,7 @@ common_conf=(
   --with-native-debug-symbols=none
   --disable-warnings-as-errors
   --enable-headless-only
+  --with-toolchain-type=clang
   --with-vendor-name=jdk-custom
   --with-vendor-url=https://github.com/HomuHomu833/jdk-custom
   --with-build-user=builder
