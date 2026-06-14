@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       jdk_version:
-        description: "OpenJDK feature version (8 | 11 | 17 | 21 | 25)"
+        description: "OpenJDK feature version"
         required: true
         default: "25"
       ndk_version:
@@ -14,7 +14,7 @@ on:
       ndk_revision:
         description: "Official NDK revision letter (optional)"
         required: false
-        default: "c"
+        default: "d"
 
 permissions:
   contents: write
