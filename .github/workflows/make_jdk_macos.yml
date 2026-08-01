@@ -19,8 +19,6 @@ jobs:
     with:
       platform: macos
       jdk_version: ${{ inputs.jdk_version }}
-      # Triples mirror android-sdk-custom. osxcross stands in for Xcode; the SDK
-      # is baked into the builder image.
       targets: >-
         ["x86_64-apple-darwin", "x86_64h-apple-darwin",
          "arm64-apple-darwin", "arm64e-apple-darwin"]
