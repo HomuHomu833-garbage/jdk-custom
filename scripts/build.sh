@@ -255,10 +255,15 @@ common_conf=(
 log "Configuring JDK $JDK_VERSION for $TARGET ($JVM_VARIANT, $TARGET_OS)"
 cd "$SRC"
 if [ "$JDK_VERSION" = 8 ]; then
-  # jdk8u: legacy build system — no bundled-lib toggles, no headless-only flag,
-  # variant is selected via --with-jvm-variants too but the option set is smaller.
-  # --enable-unlimited-crypto: ship the unlimited-strength JCE policy (default on
-  # 11+, but opt-in on 8) so full-strength ciphers work out of the box.
+  # jdk8u: legacy build system — the option set is smaller and spelled
+  # differently, but the intent matches common_conf above.
+  # --disable-headful: 8's spelling of --enable-headless-only; it also sets
+  # X11_NOT_NEEDED, so configure stops looking for X11 headers no cross sysroot
+  # here has. --with-freetype=bundled: 8u does accept it on every target OS
+  # (only the other bundled-lib toggles are missing), and without it configure
+  # goes looking for a system freetype. --enable-unlimited-crypto: ship the
+  # unlimited-strength JCE policy (default on 11+, opt-in on 8) so full-strength
+  # ciphers work out of the box.
   bash ./configure \
     --openjdk-target="$TARGET" \
     --with-boot-jdk="$BOOT_JDK" \
@@ -266,6 +271,8 @@ if [ "$JDK_VERSION" = 8 ]; then
     --with-debug-level=release \
     --disable-debug-symbols \
     --disable-warnings-as-errors \
+    --disable-headful \
+    --with-freetype=bundled \
     --enable-unlimited-crypto \
     --with-build-user=builder \
     "${EXTRA_CONF[@]}"
