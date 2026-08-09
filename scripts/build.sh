@@ -200,23 +200,26 @@ if [ "$TARGET_OS" = linux ]; then
   fi
 fi
 
-# --- CUPS headers -----------------------------------------------------------
-# Every target except windows/macosx needs the cups headers (NEEDS_LIB_CUPS), and
-# --enable-headless-only does not change that: libawt_headless compiles
-# CUPSfuncs.c. Only headers are involved — configure sets CUPS_CFLAGS and nothing
-# links against libcups, which is dlopened at run time if printing is used — and
-# they are pure API with no target-specific content, so the builder image's copy
-# serves every target. Stage them in a private dir rather than passing
-# /usr/include, which would put the host libc headers ahead of the target's.
+# --- headers-only deps (cups, fontconfig) -----------------------------------
+# configure requires both for every target except windows/macosx (NEEDS_LIB_CUPS
+# / NEEDS_LIB_FONTCONFIG), and --enable-headless-only does not exempt them:
+# libawt_headless compiles CUPSfuncs.c and fontpath.c. Neither is ever linked —
+# configure exports only CUPS_CFLAGS / FONTCONFIG_CFLAGS (no *_LIBS exists), and
+# both libraries are dlopened at run time (libcups.so.2 from CUPSfuncs.c,
+# libfontconfig.so.1 from fontpath.c). So the headers are all the build needs, and
+# being pure API they serve every target. Stage them in a private include dir
+# instead of passing /usr/include, whose -I would be searched ahead of the
+# target's own libc headers and shadow them.
 if [ "$TARGET_OS" = linux ] || [ "$TARGET_OS" = bsd ]; then
-  CUPS_INC="$BUILD_DIR/cups-include"
-  if [ ! -f "$CUPS_INC/cups/cups.h" ]; then
-    [ -f /usr/include/cups/cups.h ] || {
-      echo "cups headers missing from the builder image (libcups2-dev)" >&2; exit 1; }
-    mkdir -p "$CUPS_INC"
-    cp -R /usr/include/cups "$CUPS_INC/"
-  fi
-  EXTRA_CONF+=(--with-cups-include="$CUPS_INC")
+  DEP_INC="$BUILD_DIR/dep-include"
+  for dep in cups fontconfig; do
+    [ -d "$DEP_INC/$dep" ] && continue
+    [ -d "/usr/include/$dep" ] || {
+      echo "$dep headers missing from the builder image (see docker/Dockerfile)" >&2; exit 1; }
+    mkdir -p "$DEP_INC"
+    cp -R "/usr/include/$dep" "$DEP_INC/"
+  done
+  EXTRA_CONF+=(--with-cups-include="$DEP_INC" --with-fontconfig-include="$DEP_INC")
 fi
 
 # --- configure --------------------------------------------------------------
