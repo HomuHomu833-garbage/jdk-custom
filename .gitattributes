@@ -2,3 +2,5 @@
 scripts/* text eol=lf
 *.sh text eol=lf
 Dockerfile text eol=lf
+# Patches are fed to `git apply` against an LF source tree; CRLF breaks them.
+*.patch text eol=lf
