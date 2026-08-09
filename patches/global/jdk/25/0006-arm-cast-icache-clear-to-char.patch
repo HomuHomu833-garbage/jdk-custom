@@ -1,0 +1,26 @@
+arm: cast to char* when clearing the icache
+
+clang rejects passing `address` (unsigned char*) to __builtin___clear_cache,
+which takes char*:
+
+  icache_arm.cpp:33:27: error: cannot initialize a parameter of type 'char *'
+  with an lvalue of type 'address' (aka 'unsigned char *')
+
+gcc is lenient here, so this only shows up on the clang-built arm targets --
+which is all of ours, since the NDK is clang.
+
+From termux-packages openjdk-25 patch 0012 (Henrik Grimler).
+
+diff --git a/src/hotspot/cpu/arm/icache_arm.cpp b/src/hotspot/cpu/arm/icache_arm.cpp
+index 53e9824..fc8fc1c 100644
+--- a/src/hotspot/cpu/arm/icache_arm.cpp
++++ b/src/hotspot/cpu/arm/icache_arm.cpp
+@@ -30,7 +30,7 @@
+ 
+ 
+ static int icache_flush(address addr, int lines, int magic) {
+-  __builtin___clear_cache(addr, addr + (lines << ICache::log2_line_size));
++  __builtin___clear_cache((char*) addr, (char*) (addr + (lines << ICache::log2_line_size)));
+   return magic;
+ }
+ 

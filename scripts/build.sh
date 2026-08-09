@@ -239,7 +239,15 @@ if [ "$PLATFORM" = android ]; then
     "$CC" -c "$STUB_DIR/stub.c" -o "$STUB_DIR/stub.o"
     for l in pthread rt; do "$TC/bin/llvm-ar" rcs "$STUB_DIR/lib$l.a" "$STUB_DIR/stub.o"; done
   fi
-  EXTRA_CONF+=(--with-extra-ldflags="-L$STUB_DIR")
+  # --undefined-version: hotspot's version script marks _init/_fini local, but
+  # bionic's crt provides neither, and lld has treated a version-script entry for
+  # a missing symbol as an error since LLVM 17:
+  #   ld.lld: error: version script assignment of 'local' to symbol '_fini'
+  #   failed: symbol not defined
+  # The flag restores the older lenient behaviour for symbols that aren't there,
+  # leaving the script's meaning intact for every symbol that is — cheaper than
+  # patching version-script-clang.txt in each release.
+  EXTRA_CONF+=(--with-extra-ldflags="-L$STUB_DIR -Wl,--undefined-version")
 fi
 
 # --- libffi (Zero only) -----------------------------------------------------

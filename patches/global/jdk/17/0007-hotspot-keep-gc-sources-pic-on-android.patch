@@ -1,0 +1,29 @@
+hotspot: keep GC sources PIC on android
+
+JvmOverrideFiles.gmk compiles the memory/oops/gc sources with -fno-PIC on
+32-bit x86, an old pause-time optimisation (JDK-6454213). That cannot work on
+android: shared objects must be position independent, and mixing -fno-PIC
+objects with the PIC precompiled header stops the build outright:
+
+  error: __PIC__ level differs in PCH file vs. current file
+
+Skip the override for android only, keyed on the target triple that spec.gmk
+already carries, so other 32-bit x86 targets keep the optimisation. Termux
+deletes the block outright; gating it leaves the linux/musl x86 builds alone.
+
+diff --git a/make/hotspot/lib/JvmOverrideFiles.gmk b/make/hotspot/lib/JvmOverrideFiles.gmk
+index 377018c..bb28cf2 100644
+--- a/make/hotspot/lib/JvmOverrideFiles.gmk
++++ b/make/hotspot/lib/JvmOverrideFiles.gmk
+@@ -62,7 +62,10 @@ ifeq ($(call isTargetOs, linux), true)
+ 	#
+   endif
+ 
+-  ifeq ($(call isTargetCpu, x86), true)
++  # Not on android: its shared objects must be position independent, and
++  # -fno-PIC here also collides with the PIC precompiled header
++  # ("__PIC__ level differs in PCH file vs. current file").
++  ifeq ($(call isTargetCpu, x86)$(findstring android, $(OPENJDK_TARGET_AUTOCONF_NAME)), true)
+     # Performance measurements show that by compiling GC related code, we could
+     # significantly reduce the GC pause time on 32 bit Linux/Unix platforms by
+     # compiling without the PIC flag (-fPIC on linux).
