@@ -12,7 +12,7 @@
 #     bash -c 'scripts/fetch-source.sh && scripts/build.sh && scripts/make-jdk.sh'
 FROM ubuntu:24.04
 
-ARG ZIG_VERSION=0.17.0-dev.304+9787df942
+ARG ZIG_VERSION=0.17.0-dev.1622+2b242157b
 ARG LLVM_MINGW_VERSION=20260505
 ARG MACOS_SDK_VERSION=15.5
 ARG REPO_OWNER=HomuHomu833
