@@ -22,10 +22,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 # image assembly + configure probes. aria2/xz/git: fetch + unpack. p7zip-full:
 # 7z archives for the windows builds. python3: parse the Adoptium GA feed.
 # clang/lld + lib*-dev/cpio/bzip2: build osxcross (cctools-port) at image time.
+# libcups2-dev: headers only, staged per target by build.sh — OpenJDK needs them
+# to compile libawt_headless even for a headless build (libcups itself is dlopened
+# at run time, never linked). ALSA is not installed: build.sh drops sound from the
+# linux/android targets, since no cross sysroot here has ALSA to build against.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates aria2 xz-utils unzip zip p7zip-full git make autoconf \
         build-essential clang lld file cpio bzip2 python3 cmake \
-        libasound2-dev libxml2-dev liblzma-dev uuid-dev zlib1g-dev libssl-dev \
+        libcups2-dev libxml2-dev liblzma-dev uuid-dev zlib1g-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # fetch: aria2c with retries (transient GitHub/Adoptium 5xx). build scripts reuse it.

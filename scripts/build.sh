@@ -200,6 +200,25 @@ if [ "$TARGET_OS" = linux ]; then
   fi
 fi
 
+# --- CUPS headers -----------------------------------------------------------
+# Every target except windows/macosx needs the cups headers (NEEDS_LIB_CUPS), and
+# --enable-headless-only does not change that: libawt_headless compiles
+# CUPSfuncs.c. Only headers are involved — configure sets CUPS_CFLAGS and nothing
+# links against libcups, which is dlopened at run time if printing is used — and
+# they are pure API with no target-specific content, so the builder image's copy
+# serves every target. Stage them in a private dir rather than passing
+# /usr/include, which would put the host libc headers ahead of the target's.
+if [ "$TARGET_OS" = linux ] || [ "$TARGET_OS" = bsd ]; then
+  CUPS_INC="$BUILD_DIR/cups-include"
+  if [ ! -f "$CUPS_INC/cups/cups.h" ]; then
+    [ -f /usr/include/cups/cups.h ] || {
+      echo "cups headers missing from the builder image (libcups2-dev)" >&2; exit 1; }
+    mkdir -p "$CUPS_INC"
+    cp -R /usr/include/cups "$CUPS_INC/"
+  fi
+  EXTRA_CONF+=(--with-cups-include="$CUPS_INC")
+fi
+
 # --- configure --------------------------------------------------------------
 CONF="custom-$TARGET"
 IMAGE_DIR="$SRC/build/$CONF/images/jdk"
