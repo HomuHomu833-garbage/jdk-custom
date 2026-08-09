@@ -35,7 +35,11 @@ fi
 # everything else falls back to the portable Zero interpreter so the build still
 # yields a runnable JDK. loongarch64 has an upstream HotSpot port from 21 on.
 case "$ARCH" in
-  aarch64|aarch64_be|arm|arm64|arm64e|armeb|armhf|armv7a|i686|powerpc64|powerpc64le|ppc64|ppc64le|riscv64|s390x|thumb|thumbeb|x86|x86_64|x86_64h)
+  i686|x86)
+    # 25 dropped the 32-bit x86 JIT: basic.m4 errors out with "32-bit x86 builds
+    # are not supported" unless the variant is zero. Older releases still have it.
+    if [ "$JDK_VERSION" -ge 25 ] 2>/dev/null; then JVM_VARIANT=zero; else JVM_VARIANT=server; fi ;;
+  aarch64|aarch64_be|arm|arm64|arm64e|armeb|armhf|armv7a|powerpc64|powerpc64le|ppc64|ppc64le|riscv64|s390x|thumb|thumbeb|x86_64|x86_64h)
     JVM_VARIANT=server ;;
   loongarch64)
     if [ "$JDK_VERSION" -ge 21 ] 2>/dev/null; then JVM_VARIANT=server; else JVM_VARIANT=zero; fi ;;
@@ -139,6 +143,21 @@ case "$PLATFORM" in
     ;;
   *) echo "Unknown/unsupported PLATFORM='$PLATFORM'" >&2; exit 1 ;;
 esac
+
+# --- tell configure what the build machine is -------------------------------
+# config.guess probes the *build* system's libc by compiling with $CC, and $CC is
+# a cross compiler here — so it reports the builder as whatever we are targeting:
+# "x86_64-pc-linux-android" for the android targets, "...-androidx32" for the
+# 32-bit arm one. That is wrong everywhere, and actively breaks any target whose
+# CPU matches the builder: for x86_64-linux-android the bogus build triple equals
+# the host triple, configure concludes "compilation type... native", and host
+# build tools such as adlc get compiled with the NDK compiler — producing android
+# binaries the build itself then tries to run ("adlc: cannot execute: required
+# file not found"). Pass the real build triple so COMPILE_TYPE and every
+# OPENJDK_BUILD_* value are derived correctly.
+BUILD_TRIPLE="$(gcc -dumpmachine 2>/dev/null || clang -dumpmachine 2>/dev/null || true)"
+[ -n "$BUILD_TRIPLE" ] || { echo "cannot determine the build triple (no gcc/clang?)" >&2; exit 1; }
+EXTRA_CONF+=(--build="$BUILD_TRIPLE")
 
 # --- drop ALSA --------------------------------------------------------------
 # OpenJDK demands ALSA for every OPENJDK_TARGET_OS=linux build and links its sound
