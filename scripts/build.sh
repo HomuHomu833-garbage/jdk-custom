@@ -136,6 +136,70 @@ case "$PLATFORM" in
   *) echo "Unknown/unsupported PLATFORM='$PLATFORM'" >&2; exit 1 ;;
 esac
 
+# --- drop ALSA --------------------------------------------------------------
+# OpenJDK demands ALSA for every OPENJDK_TARGET_OS=linux build and links its sound
+# native lib against -lasound, so configure dies with "Could not find alsa!" —
+# none of the cross sysroots here carry ALSA, and bionic has no ALSA at all.
+# Termux works around this by packaging alsa-lib for Android and pointing
+# configure at it; with no equivalent sysroot for any target, sound is dropped
+# from the linux/android builds instead. macOS and Windows keep their native
+# sound (CoreAudio / DirectSound, never ALSA) and the BSDs never needed it, so
+# only TARGET_OS=linux is touched. com.sun.media.sound.Platform loads the native
+# lib in a try/catch(Throwable), so javax.sound reports no devices instead of
+# breaking java.desktop; the pure-Java parts (software synth, file readers) are
+# unaffected. Edits go into the fetched source tree and are keyed to text that is
+# stable across the supported feature versions.
+if [ "$TARGET_OS" = linux ]; then
+  log "Dropping the ALSA dependency (no cross sysroot here ships ALSA)"
+  if [ "$JDK_VERSION" = 8 ]; then
+    # 8: ALSA lives in its own libjsoundalsa, pulled in only when the makefile
+    # adds jsoundalsa to EXTRA_SOUND_JNI_LIBS — drop that and the core libjsound
+    # still builds. 8 is also the one version shipping a checked-in
+    # generated-configure.sh, so ALSA_NOT_NEEDED goes into it as well as the .m4.
+    SND_GMK="$SRC/jdk/make/lib/SoundLibraries.gmk"
+    grep -q 'EXTRA_SOUND_JNI_LIBS += jsoundalsa' "$SND_GMK" 2>/dev/null || {
+      echo "unexpected $SND_GMK: no jsoundalsa to drop" >&2; exit 1; }
+    for f in "$SRC/common/autoconf/libraries.m4" "$SRC/common/autoconf/generated-configure.sh"; do
+      [ -f "$f" ] || continue
+      # The linux block only disables pulse; disable alsa right alongside it. The
+      # other OS blocks that set PULSE_NOT_NEEDED already disable alsa too, so
+      # matching all of them is harmless.
+      sed -i 's/^\([[:space:]]*\)PULSE_NOT_NEEDED=yes$/\1PULSE_NOT_NEEDED=yes\n\1ALSA_NOT_NEEDED=yes/' "$f"
+    done
+    sed -i '/EXTRA_SOUND_JNI_LIBS += jsoundalsa/d' "$SND_GMK"
+  else
+    # 11+: configure regenerates from the .m4 via autoconf (no checked-in
+    # generated-configure.sh since 11), so clearing NEEDS_LIB_ALSA is enough.
+    ALSA_M4="$SRC/make/autoconf/libraries.m4"
+    grep -qE 'NEEDS_LIB_ALSA=(true|false)' "$ALSA_M4" || {
+      echo "unexpected $ALSA_M4: no NEEDS_LIB_ALSA to disable" >&2; exit 1; }
+    sed -i 's/NEEDS_LIB_ALSA=true/NEEDS_LIB_ALSA=false/' "$ALSA_M4"
+
+    # Then skip libjsound itself, as AIX already does: its ALSA sources include
+    # <alsa/asoundlib.h> and call snd_* outside the USE_* guards, so the library
+    # cannot be built at all without ALSA headers. 11 keeps the rules in
+    # make/lib/, 17+ in make/modules/; both open the block with the same
+    # `ifeq ($(call isTargetOs, aix), false)` line, matched via the
+    # LIBJSOUND_CFLAGS that follows it so no other ifeq is hit.
+    JSOUND_GMK="$SRC/make/modules/java.desktop/Lib.gmk"
+    [ -f "$JSOUND_GMK" ] || JSOUND_GMK="$SRC/make/lib/Lib-java.desktop.gmk"
+    [ -f "$JSOUND_GMK" ] || { echo "libjsound makefile not found under $SRC/make" >&2; exit 1; }
+    if ! grep -q 'drop-alsa' "$JSOUND_GMK"; then
+      awk '
+        { line[NR] = $0 }
+        /^ifeq \(\$\(call isTargetOs, aix\), false\)$/ { guard = NR }
+        /LIBJSOUND_CFLAGS/ && guard && !target { target = guard }
+        END {
+          if (!target) exit 1
+          for (i = 1; i <= NR; i++) print (i == target ? "ifeq (drop-alsa, keep-alsa)" : line[i])
+        }
+      ' "$JSOUND_GMK" > "$JSOUND_GMK.tmp" || {
+        echo "unexpected $JSOUND_GMK: libjsound guard not found" >&2; exit 1; }
+      mv "$JSOUND_GMK.tmp" "$JSOUND_GMK"
+    fi
+  fi
+fi
+
 # --- configure --------------------------------------------------------------
 CONF="custom-$TARGET"
 IMAGE_DIR="$SRC/build/$CONF/images/jdk"
