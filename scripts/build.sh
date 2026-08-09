@@ -223,6 +223,25 @@ if [ "$TARGET_OS" = linux ]; then
   fi
 fi
 
+# --- bionic link stubs ------------------------------------------------------
+# configure puts -lpthread and -lrt on the link line (libraries.m4: LIBPTHREAD,
+# and the librt entry in BASIC_JVM_LIBS), and jdk8's makefiles hardcode -lpthread
+# in several more places. bionic ships neither library: pthreads and the POSIX
+# timers are part of libc. Rather than patch every reference in every release,
+# put empty archives with those names on the link path — the linker resolves the
+# flags, they contribute nothing, and the symbols come from libc as intended.
+if [ "$PLATFORM" = android ]; then
+  STUB_DIR="$BUILD_DIR/bionic-stubs/$TARGET"
+  if [ ! -f "$STUB_DIR/libpthread.a" ]; then
+    log "Building empty libpthread/librt stubs for $TARGET"
+    mkdir -p "$STUB_DIR"
+    printf 'void jdk_custom_bionic_stub(void) {}\n' > "$STUB_DIR/stub.c"
+    "$CC" -c "$STUB_DIR/stub.c" -o "$STUB_DIR/stub.o"
+    for l in pthread rt; do "$TC/bin/llvm-ar" rcs "$STUB_DIR/lib$l.a" "$STUB_DIR/stub.o"; done
+  fi
+  EXTRA_CONF+=(--with-extra-ldflags="-L$STUB_DIR")
+fi
+
 # --- headers-only deps (cups, fontconfig) -----------------------------------
 # configure requires both for every target except windows/macosx (NEEDS_LIB_CUPS
 # / NEEDS_LIB_FONTCONFIG), and --enable-headless-only does not exempt them:
