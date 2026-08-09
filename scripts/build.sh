@@ -119,7 +119,11 @@ case "$PLATFORM" in
     # (e.g. Termux). HotSpot has no bionic port, so every Android target is Zero.
     : "${NDK_VERSION:?set NDK_VERSION for the android build}"
     NDK_REVISION="${NDK_REVISION:-}"
-    API="${ANDROID_PLATFORM:-26}"; [ "$TARGET" = riscv64-linux-android ] && API=35
+    # API 28 (Android 9) is the floor: os_posix.cpp calls posix_spawn(), which
+    # bionic only declares from 28 on (__INTRODUCED_IN(28) in <spawn.h>).
+    # Overridable via ANDROID_PLATFORM; note getloadavg() needs 29, which the
+    # sysinfo patch covers below that.
+    API="${ANDROID_PLATFORM:-28}"; [ "$TARGET" = riscv64-linux-android ] && API=35
     NDK_NAME="android-ndk-r${NDK_VERSION}${NDK_REVISION}"
     NDK_DIR="$ROOTDIR/$NDK_NAME"
     if [ ! -d "$NDK_DIR" ]; then

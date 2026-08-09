@@ -1,0 +1,27 @@
+os_linux: don't use dlinfo/RTLD_DI_LINKMAP on android
+
+bionic implements neither, so os::Linux::dll_path() fails to compile with
+"no member named 'dlinfo'" and "use of undeclared identifier
+'RTLD_DI_LINKMAP'". The function already returns nullptr when the lookup
+fails, so skipping it on android is a supported outcome for every caller.
+
+From termux-packages openjdk-25 patch 0031 (Henrik Grimler).
+
+diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.cpp
+index c41d459c1..7efca5710 100644
+--- a/src/hotspot/os/linux/os_linux.cpp
++++ b/src/hotspot/os/linux/os_linux.cpp
+@@ -1870,11 +1870,12 @@ const char* os::Linux::dll_path(void* lib) {
+   struct link_map *lmap;
+   const char* l_path = nullptr;
+   assert(lib != nullptr, "dll_path parameter must not be null");
+-
++#ifndef __ANDROID__
+   int res_dli = ::dlinfo(lib, RTLD_DI_LINKMAP, &lmap);
+   if (res_dli == 0) {
+     l_path = lmap->l_name;
+   }
++#endif
+   return l_path;
+ }
+ 

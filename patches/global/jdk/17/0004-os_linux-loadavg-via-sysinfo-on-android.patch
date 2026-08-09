@@ -1,0 +1,34 @@
+os_linux: implement loadavg via sysinfo on android
+
+bionic only gained getloadavg() in API 29, so os::loadavg() fails to compile
+with "no member named 'getloadavg'" below that. Derive the same numbers from
+sysinfo(2), which bionic has always had. The guard keys off __ANDROID_API__,
+so raising the target API past 29 goes back to getloadavg() automatically.
+
+Equivalent to termux-packages openjdk-25 patch 0025 (Henrik Grimler).
+
+diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.cpp
+index 803cfbb..fe22d65 100644
+--- a/src/hotspot/os/linux/os_linux.cpp
++++ b/src/hotspot/os/linux/os_linux.cpp
+@@ -5249,7 +5249,20 @@ bool os::is_thread_cpu_time_supported() {
+ // Linux doesn't yet have a (official) notion of processor sets,
+ // so just return the system wide load average.
+ int os::loadavg(double loadavg[], int nelem) {
++#if defined(__ANDROID__) && __ANDROID_API__ < 29
++  if (nelem < 0) return -1;
++  if (nelem > 3) nelem = 3;
++
++  struct sysinfo si;
++  if (sysinfo(&si) == -1) return -1;
++
++  for (int i = 0; i < nelem; ++i) {
++    loadavg[i] = (double)(si.loads[i]) / (double)(1 << SI_LOAD_SHIFT);
++  }
++  return nelem;
++#else
+   return ::getloadavg(loadavg, nelem);
++#endif
+ }
+ 
+ void os::pause() {

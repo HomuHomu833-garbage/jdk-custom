@@ -1,0 +1,38 @@
+os_linux: don't query glibc/pthread versions on android
+
+bionic defines neither _CS_GNU_LIBC_VERSION nor _CS_GNU_LIBPTHREAD_VERSION,
+so libpthread_init() hits the "glibc too old (< 2.3.2)" #error and then four
+"use of undeclared identifier '_CS_GNU_*'" errors. bionic also has no separate
+pthread library to version -- it is part of libc -- so report a fixed string,
+exactly as the existing MUSL_LIBC branch does.
+
+Based on termux-packages openjdk-25 patch 0002 (Henrik Grimler), minus its
+dlvsym hunk: bionic provides dlvsym from API 24 on, which their own patch 0022
+walks back, and every target here builds against a higher API.
+
+diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.cpp
+index e4b8c9a..8d2a9a8 100644
+--- a/src/hotspot/os/linux/os_linux.cpp
++++ b/src/hotspot/os/linux/os_linux.cpp
+@@ -688,6 +688,13 @@ void os::init_system_properties_values() {
+ // detecting pthread library
+ 
+ void os::Linux::libpthread_init() {
++#ifdef __ANDROID__
++  // bionic defines neither _CS_GNU_LIBC_VERSION nor _CS_GNU_LIBPTHREAD_VERSION,
++  // and its pthread implementation lives inside libc rather than a separate
++  // library, so there is no version to query. Report it like the musl case does.
++  os::Linux::set_libc_version("bionic - unknown");
++  os::Linux::set_libpthread_version("bionic - unknown");
++#else
+   // Save glibc and pthread version strings.
+ #if !defined(_CS_GNU_LIBC_VERSION) || \
+     !defined(_CS_GNU_LIBPTHREAD_VERSION)
+@@ -712,6 +719,7 @@ void os::Linux::libpthread_init() {
+   confstr(_CS_GNU_LIBPTHREAD_VERSION, str, n);
+   os::Linux::set_libpthread_version(str);
+ #endif
++#endif
+ }
+ 
+ /////////////////////////////////////////////////////////////////////////////
