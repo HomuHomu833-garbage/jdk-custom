@@ -242,6 +242,46 @@ if [ "$PLATFORM" = android ]; then
   EXTRA_CONF+=(--with-extra-ldflags="-L$STUB_DIR")
 fi
 
+# --- libffi (Zero only) -----------------------------------------------------
+# Zero calls native code through libffi, and configure requires it whenever the
+# variant is zero (libraries.m4: NEEDS_LIB_FFI). Unlike cups/fontconfig this one
+# is genuinely linked — lib-ffi.m4 sets LIBFFI_LIBS=-lffi — and no cross sysroot
+# here ships it, so build it from source for the target.
+#   --with-pic + static: libffi ends up inside libjvm.so, so its objects must be
+#   position independent; linking it statically also means the finished JDK has
+#   no run-time libffi.so to find on a device that has none.
+#   --build is passed for the same config.guess reason as above: $CC is a cross
+#   compiler, so libffi would otherwise misdetect the builder and, worse, not
+#   realise it is cross-compiling and try to run its test programs.
+if [ "$JVM_VARIANT" = zero ]; then
+  LIBFFI_VERSION="${LIBFFI_VERSION:-3.7.1}"
+  FFI_PREFIX="$BUILD_DIR/libffi/$TARGET"
+  if [ ! -f "$FFI_PREFIX/lib/libffi.a" ]; then
+    log "Cross-building libffi $LIBFFI_VERSION for $TARGET (needed by Zero)"
+    FFI_SRC="$BUILD_DIR/libffi/src-$LIBFFI_VERSION"
+    if [ ! -d "$FFI_SRC" ]; then
+      mkdir -p "$FFI_SRC"
+      aria2c --console-log-level=error --check-certificate=false --max-tries=5 \
+        --dir="$BUILD_DIR/libffi" -o libffi.tar.gz \
+        "https://github.com/libffi/libffi/releases/download/v${LIBFFI_VERSION}/libffi-${LIBFFI_VERSION}.tar.gz"
+      tar -xzf "$BUILD_DIR/libffi/libffi.tar.gz" -C "$FFI_SRC" --strip-components=1
+      rm -f "$BUILD_DIR/libffi/libffi.tar.gz"
+    fi
+    FFI_BUILD="$BUILD_DIR/libffi/build-$TARGET"
+    rm -rf "$FFI_BUILD"; mkdir -p "$FFI_BUILD"
+    ffi_conf=(--host="$TARGET" --build="$BUILD_TRIPLE" --prefix="$FFI_PREFIX"
+              --enable-static --disable-shared --with-pic --disable-multi-os-directory)
+    # Prefer the toolchain's own archiver; the wrapper sets vary per platform, so
+    # fall back to whatever libffi's configure finds when it isn't there.
+    [ -x "$TC/bin/llvm-ar" ] && ffi_conf+=(AR="$TC/bin/llvm-ar" RANLIB="$TC/bin/llvm-ranlib")
+    ( cd "$FFI_BUILD" && "$FFI_SRC/configure" "${ffi_conf[@]}" \
+        && make -j"$(nproc 2>/dev/null || echo 2)" && make install )
+    [ -f "$FFI_PREFIX/lib/libffi.a" ] || {
+      echo "libffi build did not produce $FFI_PREFIX/lib/libffi.a" >&2; exit 1; }
+  fi
+  EXTRA_CONF+=(--with-libffi-include="$FFI_PREFIX/include" --with-libffi-lib="$FFI_PREFIX/lib")
+fi
+
 # --- headers-only deps (cups, fontconfig) -----------------------------------
 # configure requires both for every target except windows/macosx (NEEDS_LIB_CUPS
 # / NEEDS_LIB_FONTCONFIG), and --enable-headless-only does not exempt them:
