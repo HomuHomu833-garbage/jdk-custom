@@ -369,6 +369,24 @@ if [ "$PLATFORM" = android ]; then
   # patching version-script-clang.txt in each release.
   EXTRA_CONF+=(--with-extra-ldflags="-L$STUB_DIR -Wl,--undefined-version")
 
+  # bionic's linker honours DT_RUNPATH and ignores DT_RPATH outright, so a JDK
+  # that asks for the old tag cannot find its own libraries and no launcher
+  # starts:
+  #   WARNING: linker: ... unused DT entry: DT_RPATH (type 0xf arg 0xcf) (ignoring)
+  #   CANNOT LINK EXECUTABLE "./java": library "libjli.so" not found
+  # OpenJDK asks for it deliberately -- RPATH outranks LD_LIBRARY_PATH, so the
+  # JDK's internal dependencies cannot be hijacked (JDK-8326891) -- but on
+  # android the choice is between RUNPATH and nothing. Drop the flag for these
+  # builds only; the linux ones keep RPATH and that protection. 8 never passes
+  # it, and lld defaults to the new tags, so it has no file to edit here.
+  DTAGS_M4="$SRC/make/autoconf/flags-cflags.m4"
+  if [ -f "$DTAGS_M4" ]; then
+    grep -q -- '-Wl,--disable-new-dtags' "$DTAGS_M4" || {
+      echo "unexpected $DTAGS_M4: no --disable-new-dtags to remove" >&2; exit 1; }
+    log "Letting the linker emit DT_RUNPATH (bionic ignores DT_RPATH)"
+    sed -i 's/ -Wl,--disable-new-dtags//g' "$DTAGS_M4"
+  fi
+
   # aarch64: 11 keeps the TLSDESC thread-pointer helper in a lowercase .s, which
   # the compiler never preprocesses, so unlike 17+ it cannot be guarded with
   # #ifndef __ANDROID__ from inside. Excluding it through the makefiles did not
