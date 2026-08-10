@@ -71,11 +71,13 @@ case "$PLATFORM" in
     export CC="$TC/bin/cc" CXX="$TC/bin/c++"
     EXTRA_CONF+=(AR="$TC/bin/ar" NM="$TC/bin/nm" STRIP="$TC/bin/strip" OBJCOPY="$TC/bin/objcopy" OBJDUMP="$TC/bin/objdump")
     TARGET_OS=linux
-    # musl: fold libgcc into the binaries so nothing external is needed for it.
-    # Deliberately not a static libc: the JDK reaches for dlopen all over the
-    # place (JNI/System.loadLibrary, fontconfig, cups, the miniaudio backends),
-    # and dlopen in a statically linked musl binary always fails. glibc keeps
-    # both dynamic.
+    # musl is static here and there is no way around it: zig supports musl only
+    # as a static libc, so these targets link it in whether or not we ask.
+    # -static-libgcc folds libgcc in to match. What that costs is dlopen — it
+    # always fails in a statically linked musl binary — so anything the JDK
+    # loads at run time rather than links (fontconfig, cups, the miniaudio
+    # backends) is unavailable on musl. glibc keeps libc dynamic and keeps all
+    # of it.
     case "$TARGET" in
       *musl*) EXTRA_CONF+=(--with-extra-ldflags=-static-libgcc) ;;
     esac
