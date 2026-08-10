@@ -7,23 +7,26 @@ objects with the PIC precompiled header stops the build outright:
 
   error: __PIC__ level differs in PCH file vs. current file
 
-Skip the override for android only, keyed on the target triple that spec.gmk
-already carries, so other 32-bit x86 targets keep the optimisation. Termux
-deletes the block outright; gating it leaves the linux/musl x86 builds alone.
+Skip the override on android, keyed on OPENJDK_TARGET_LIBC: configure derives
+it from the target triple and only ever says gnu or musl for the linux x86
+targets built here, while android (bionic) lands in "default". Termux deletes
+the block outright (0020-x86-always-compile-with-PIC); gating it leaves the
+linux/musl x86 builds with the optimisation they can still use.
 
 diff --git a/make/hotspot/lib/JvmOverrideFiles.gmk b/make/hotspot/lib/JvmOverrideFiles.gmk
 index 377018c..bb28cf2 100644
 --- a/make/hotspot/lib/JvmOverrideFiles.gmk
 +++ b/make/hotspot/lib/JvmOverrideFiles.gmk
-@@ -62,7 +62,10 @@ ifeq ($(call isTargetOs, linux), true)
+@@ -62,7 +62,11 @@ ifeq ($(call isTargetOs, linux), true)
  	#
    endif
  
 -  ifeq ($(call isTargetCpu, x86), true)
 +  # Not on android: its shared objects must be position independent, and
 +  # -fno-PIC here also collides with the PIC precompiled header
-+  # ("__PIC__ level differs in PCH file vs. current file").
-+  ifeq ($(call isTargetCpu, x86)$(findstring android, $(OPENJDK_TARGET_AUTOCONF_NAME)), true)
++  # ("__PIC__ level differs in PCH file vs. current file"). Only the gnu and
++  # musl x86 targets keep it; bionic reports its libc as "default".
++  ifeq ($(call isTargetCpu, x86)-$(if $(filter gnu musl, $(OPENJDK_TARGET_LIBC)),known,other), true-known)
      # Performance measurements show that by compiling GC related code, we could
      # significantly reduce the GC pause time on 32 bit Linux/Unix platforms by
      # compiling without the PIC flag (-fPIC on linux).

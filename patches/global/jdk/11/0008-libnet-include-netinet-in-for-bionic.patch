@@ -1,0 +1,27 @@
+libnet: include <netinet/in.h> on android
+
+net_util_md.h builds its SOCKETADDRESS union out of struct sockaddr_in /
+sockaddr_in6, but only includes <netdb.h>, <poll.h> and <sys/socket.h>.
+glibc's <netdb.h> drags in <netinet/in.h> as a side effect, so the omission
+never shows there; bionic's does not, and every libnet source fails:
+
+  net_util_md.h:70:25: error: field has incomplete type 'struct sockaddr_in'
+  net_util_md.h:71:25: error: field has incomplete type 'struct sockaddr_in6'
+
+Include the header that actually declares them. Guarded on __ANDROID__ like
+termux-packages' 0001-libinet-include-netinet-in.h-for-android-builds, so the
+other targets keep the include set upstream tests.
+
+diff --git a/src/java.base/unix/native/libnet/net_util_md.h b/src/java.base/unix/native/libnet/net_util_md.h
+--- a/src/java.base/unix/native/libnet/net_util_md.h
++++ b/src/java.base/unix/native/libnet/net_util_md.h
+@@ -26,6 +26,9 @@
+ #ifndef NET_UTILS_MD_H
+ #define NET_UTILS_MD_H
+ 
++#ifdef __ANDROID__
++#include <netinet/in.h>
++#endif
+ #include <netdb.h>
+ #include <poll.h>
+ #include <sys/socket.h>
