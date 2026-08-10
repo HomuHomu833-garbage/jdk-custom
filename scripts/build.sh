@@ -171,6 +171,13 @@ esac
 # build tools such as adlc get compiled with the NDK compiler — producing android
 # binaries the build itself then tries to run ("adlc: cannot execute: required
 # file not found"). Pass the real build triple so COMPILE_TYPE and every
+#
+# The triple goes in as the autoconf --build/--host/--target set rather than via
+# --openjdk-target, because 8, 11 and 17 refuse the two together outright
+# ("Specifying --openjdk-target together with autoconf legacy cross-compilation
+# flags is not supported") while 21 and 25 accept it. Every one of them takes the
+# autoconf set on its own — with a warning, and --openjdk-target expands to
+# exactly this internally — so it is the one spelling that works across all five.
 # OPENJDK_BUILD_* value are derived correctly.
 BUILD_TRIPLE="$(gcc -dumpmachine 2>/dev/null || clang -dumpmachine 2>/dev/null || true)"
 [ -n "$BUILD_TRIPLE" ] || { echo "cannot determine the build triple (no gcc/clang?)" >&2; exit 1; }
@@ -422,7 +429,8 @@ IMAGE_DIR="$SRC/build/$CONF/images/jdk"
 # Flags common to every modern (11+) configure. Bundled libs keep the build
 # self-contained per target; headless-only drops the X11/CUPS desktop deps.
 common_conf=(
-  --openjdk-target="$TARGET"
+  --host="$TARGET"
+  --target="$TARGET"
   --with-boot-jdk="$BOOT_JDK"
   --with-build-jdk="$BOOT_JDK"
   --with-jvm-variants="$JVM_VARIANT"
@@ -458,7 +466,8 @@ if [ "$JDK_VERSION" = 8 ]; then
   # unlimited-strength JCE policy (default on 11+, opt-in on 8) so full-strength
   # ciphers work out of the box.
   bash ./configure \
-    --openjdk-target="$TARGET" \
+    --host="$TARGET" \
+    --target="$TARGET" \
     --with-boot-jdk="$BOOT_JDK" \
     --with-jvm-variants="$JVM_VARIANT" \
     --with-debug-level=release \
