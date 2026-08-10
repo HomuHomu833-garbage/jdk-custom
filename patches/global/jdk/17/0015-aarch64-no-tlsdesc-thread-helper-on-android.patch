@@ -1,0 +1,66 @@
+aarch64: don't reach Thread::_thr_current through TLSDESC on android
+
+threadLS_linux_aarch64 reads the current thread out of a TLS slot with the
+TLSDESC sequence:
+
+  adrp x0, :tlsdesc:_ZN6Thread12_thr_currentE
+  .tlsdesccall _ZN6Thread12_thr_currentE
+
+bionic's linker does not support TLSDESC relocations at the API level built
+here, so the reference cannot be resolved and libjvm.so is left with an
+undefined Thread::_thr_current. Shared libraries tolerate that at link time,
+which is why it stays invisible -- until something links an executable against
+libjvm.so:
+
+  ld.lld: error: undefined reference due to --no-allow-shlib-undefined:
+      Thread::_thr_current
+
+11 is the release that surfaced it, because it bundles googletest and builds
+gtestLauncher; 17 and up need --with-gtest and never link such a binary. The
+relocation is identical in all of them, so all of them get the fix.
+
+Drop the assembly on android and let aarch64_get_thread_helper() return
+Thread::current() instead, as termux-packages does in
+0006-aarch64_get_thread_helper-Thread-current and
+0007-Remove-aarch64_get_thread_helper.
+
+diff --git a/src/hotspot/os_cpu/linux_aarch64/threadLS_linux_aarch64.S b/src/hotspot/os_cpu/linux_aarch64/threadLS_linux_aarch64.S
+index f541844..eaee224 100644
+--- a/src/hotspot/os_cpu/linux_aarch64/threadLS_linux_aarch64.S
++++ b/src/hotspot/os_cpu/linux_aarch64/threadLS_linux_aarch64.S
+@@ -19,6 +19,8 @@
+ // or visit www.oracle.com if you need additional information or have any
+ // questions.
+ 
++#ifndef __ANDROID__
++
+         // JavaThread::aarch64_get_thread_helper()
+         //
+         // Return the current thread pointer in x0.
+@@ -42,3 +44,5 @@ _ZN10JavaThread25aarch64_get_thread_helperEv:
+ 	ret
+ 
+ 	.size _ZN10JavaThread25aarch64_get_thread_helperEv, .-_ZN10JavaThread25aarch64_get_thread_helperEv
++
++#endif // !__ANDROID__
+diff --git a/src/hotspot/os_cpu/linux_aarch64/thread_linux_aarch64.hpp b/src/hotspot/os_cpu/linux_aarch64/thread_linux_aarch64.hpp
+index 5a1f273..0e921e6 100644
+--- a/src/hotspot/os_cpu/linux_aarch64/thread_linux_aarch64.hpp
++++ b/src/hotspot/os_cpu/linux_aarch64/thread_linux_aarch64.hpp
+@@ -47,6 +47,15 @@ private:
+   bool pd_get_top_frame(frame* fr_addr, void* ucontext, bool isInJava);
+ public:
+ 
+-  static Thread *aarch64_get_thread_helper();
++  // bionic's linker cannot resolve the TLSDESC relocations the assembly below
++  // uses to read Thread::_thr_current, so read the thread the ordinary way.
++  static Thread *aarch64_get_thread_helper()
++#ifndef __ANDROID__
++;
++#else
++  {
++    return Thread::current();
++  }
++#endif
+ 
+ #endif // OS_CPU_LINUX_AARCH64_THREAD_LINUX_AARCH64_HPP

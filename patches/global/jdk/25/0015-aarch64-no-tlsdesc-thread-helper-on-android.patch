@@ -1,0 +1,66 @@
+aarch64: don't reach Thread::_thr_current through TLSDESC on android
+
+threadLS_linux_aarch64 reads the current thread out of a TLS slot with the
+TLSDESC sequence:
+
+  adrp x0, :tlsdesc:_ZN6Thread12_thr_currentE
+  .tlsdesccall _ZN6Thread12_thr_currentE
+
+bionic's linker does not support TLSDESC relocations at the API level built
+here, so the reference cannot be resolved and libjvm.so is left with an
+undefined Thread::_thr_current. Shared libraries tolerate that at link time,
+which is why it stays invisible -- until something links an executable against
+libjvm.so:
+
+  ld.lld: error: undefined reference due to --no-allow-shlib-undefined:
+      Thread::_thr_current
+
+11 is the release that surfaced it, because it bundles googletest and builds
+gtestLauncher; 17 and up need --with-gtest and never link such a binary. The
+relocation is identical in all of them, so all of them get the fix.
+
+Drop the assembly on android and let aarch64_get_thread_helper() return
+Thread::current() instead, as termux-packages does in
+0006-aarch64_get_thread_helper-Thread-current and
+0007-Remove-aarch64_get_thread_helper.
+
+diff --git a/src/hotspot/os_cpu/linux_aarch64/javaThread_linux_aarch64.hpp b/src/hotspot/os_cpu/linux_aarch64/javaThread_linux_aarch64.hpp
+index c6e012e..68c7919 100644
+--- a/src/hotspot/os_cpu/linux_aarch64/javaThread_linux_aarch64.hpp
++++ b/src/hotspot/os_cpu/linux_aarch64/javaThread_linux_aarch64.hpp
+@@ -47,6 +47,15 @@ private:
+   bool pd_get_top_frame(frame* fr_addr, void* ucontext, bool isInJava);
+ public:
+ 
+-  static Thread *aarch64_get_thread_helper();
++  // bionic's linker cannot resolve the TLSDESC relocations the assembly below
++  // uses to read Thread::_thr_current, so read the thread the ordinary way.
++  static Thread *aarch64_get_thread_helper()
++#ifndef __ANDROID__
++;
++#else
++  {
++    return Thread::current();
++  }
++#endif
+ 
+ #endif // OS_CPU_LINUX_AARCH64_JAVATHREAD_LINUX_AARCH64_HPP
+diff --git a/src/hotspot/os_cpu/linux_aarch64/threadLS_linux_aarch64.S b/src/hotspot/os_cpu/linux_aarch64/threadLS_linux_aarch64.S
+index 451c137..64e8dbf 100644
+--- a/src/hotspot/os_cpu/linux_aarch64/threadLS_linux_aarch64.S
++++ b/src/hotspot/os_cpu/linux_aarch64/threadLS_linux_aarch64.S
+@@ -20,6 +20,8 @@
+ // or visit www.oracle.com if you need additional information or have any
+ // questions.
+ 
++#ifndef __ANDROID__
++
+ #include "defs.S.inc"
+ 
+         // JavaThread::aarch64_get_thread_helper()
+@@ -76,3 +78,5 @@ DECLARE_FUNC(_ZN10JavaThread25aarch64_get_thread_helperEv):
+         .long   0
+         .popsection
+ #endif
++
++#endif // !__ANDROID__
