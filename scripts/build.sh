@@ -22,6 +22,8 @@ ARCH="${TARGET%%-*}"
 BUILD_DIR="$ROOTDIR/build"
 INSTALL_DIR="$ROOTDIR/install"
 MINIAUDIO_VERSION="${MINIAUDIO_VERSION:-0.11.25}"
+# The same file 21 and 25 ship, pinned to a tag; see the config.sub block below.
+CONFIG_SUB_URL="${CONFIG_SUB_URL:-https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12%2B8/make/autoconf/build-aux/autoconf-config.sub}"
 MINIAUDIO_BACKEND="${MINIAUDIO_BACKEND:-$SCRIPT_DIR/../src/libjsound/PLATFORM_API_MiniAudio_PCM.c}"
 cd "$ROOTDIR"
 
@@ -422,6 +424,29 @@ if [ "$TARGET_OS" = linux ] || [ "$TARGET_OS" = bsd ]; then
   EXTRA_CONF+=(--with-cups-include="$DEP_INC" --with-fontconfig-include="$DEP_INC")
 fi
 
+# --- a config.sub that knows android ----------------------------------------
+# 8, 11 and 17 ship an autoconf-config.sub from 2008, which predates android and
+# rejects every triple built here — configure stops at "checking host system
+# type" with "Invalid configuration `x86_64-linux-android': system `android' not
+# recognized". 21 and 25 carry a 2022 copy that resolves all of them. Swap the
+# stale file for that same known-good one, and only when the tree's own copy
+# cannot parse this target, so a release that refreshes it is left alone.
+CONFIG_SUB_DIR="$SRC/make/autoconf/build-aux"
+[ -d "$CONFIG_SUB_DIR" ] || CONFIG_SUB_DIR="$SRC/common/autoconf/build-aux"
+if [ -f "$CONFIG_SUB_DIR/config.sub" ] \
+   && ! bash "$CONFIG_SUB_DIR/config.sub" "$TARGET" >/dev/null 2>&1; then
+  log "Refreshing config.sub (the bundled one predates android)"
+  CONFIG_SUB_CACHE="$BUILD_DIR/autoconf-config.sub"
+  if [ ! -f "$CONFIG_SUB_CACHE" ]; then
+    mkdir -p "$BUILD_DIR"
+    aria2c --console-log-level=error --check-certificate=false --max-tries=5 \
+      --dir="$BUILD_DIR" -o autoconf-config.sub "$CONFIG_SUB_URL"
+  fi
+  cp "$CONFIG_SUB_CACHE" "$CONFIG_SUB_DIR/autoconf-config.sub"
+  bash "$CONFIG_SUB_DIR/config.sub" "$TARGET" >/dev/null 2>&1 || {
+    echo "refreshed config.sub still cannot parse '$TARGET'" >&2; exit 1; }
+fi
+
 # --- configure --------------------------------------------------------------
 CONF="custom-$TARGET"
 IMAGE_DIR="$SRC/build/$CONF/images/jdk"
@@ -443,7 +468,6 @@ common_conf=(
   BUILD_CXX=clang++
   --with-vendor-name=jdk-custom
   --with-vendor-url=https://github.com/HomuHomu833/jdk-custom
-  --with-build-user=builder
   --with-freetype=bundled
   --with-libpng=bundled
   --with-giflib=bundled
@@ -452,6 +476,16 @@ common_conf=(
   --with-zlib=bundled
   --with-conf-name="$CONF"
 )
+
+# --with-build-user arrived in 17. configure treats unknown options as fatal
+# ("configure: error: unrecognized options: --with-build-user"), so 11 only gets
+# the environment fallback below.
+if [ "$JDK_VERSION" -ge 17 ] 2>/dev/null; then
+  common_conf+=(--with-build-user=builder)
+fi
+# Same intent for the releases without the option: the build otherwise stamps
+# whoever ran it into the release file.
+export USER=builder
 
 log "Configuring JDK $JDK_VERSION for $TARGET ($JVM_VARIANT, $TARGET_OS)"
 cd "$SRC"
@@ -464,7 +498,9 @@ if [ "$JDK_VERSION" = 8 ]; then
   # (only the other bundled-lib toggles are missing), and without it configure
   # goes looking for a system freetype. --enable-unlimited-crypto: ship the
   # unlimited-strength JCE policy (default on 11+, opt-in on 8) so full-strength
-  # ciphers work out of the box.
+  # ciphers work out of the box. Neither --disable-warnings-as-errors nor
+  # --with-build-user exists yet in 8, and configure makes unknown options fatal,
+  # so both are left off.
   bash ./configure \
     --host="$TARGET" \
     --target="$TARGET" \
@@ -472,11 +508,9 @@ if [ "$JDK_VERSION" = 8 ]; then
     --with-jvm-variants="$JVM_VARIANT" \
     --with-debug-level=release \
     --disable-debug-symbols \
-    --disable-warnings-as-errors \
     --disable-headful \
     --with-freetype=bundled \
     --enable-unlimited-crypto \
-    --with-build-user=builder \
     "${EXTRA_CONF[@]}"
   CONF8="$(ls -d "$SRC"/build/*/ 2>/dev/null | head -n1)"
   IMAGE_DIR="${CONF8%/}/images/j2sdk-image"

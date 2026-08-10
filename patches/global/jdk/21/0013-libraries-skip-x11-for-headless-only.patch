@@ -1,0 +1,37 @@
+libraries: don't require X11 for a headless-only build
+
+configure insists on X11 for every non-windows, non-macosx target here, so the
+android builds stop before compiling anything:
+
+  configure: error: Could not find X11 libraries.
+
+No cross sysroot in this repository has X11, and bionic has none at all. The
+build is already --enable-headless-only, which is exactly the case upstream
+exempts: 17 carries this same elif, and 25 has it again after the X11 include
+was dropped from libawt. 11 and 21 are the two releases in between that ask for
+X11 regardless.
+
+Note the comment being replaced claims libawt needs X11 headers even when
+headless. If that is still true on these releases, the build will now fail on a
+missing X11/*.h instead, and the headers have to be staged the way cups and
+fontconfig already are -- but 25 builds headless with no X11 at all, so the
+claim looks stale.
+
+diff --git a/make/autoconf/libraries.m4 b/make/autoconf/libraries.m4
+index 51d4f72..845de29 100644
+--- a/make/autoconf/libraries.m4
++++ b/make/autoconf/libraries.m4
+@@ -45,9 +45,11 @@ AC_DEFUN_ONCE([LIB_DETERMINE_DEPENDENCIES],
+   if test "x$OPENJDK_TARGET_OS" = xwindows || test "x$OPENJDK_TARGET_OS" = xmacosx; then
+     # No X11 support on windows or macosx
+     NEEDS_LIB_X11=false
++  elif test "x$ENABLE_HEADLESS_ONLY" = xtrue; then
++    # No X11 support needed when building headless only
++    NEEDS_LIB_X11=false
+   else
+-    # All other instances need X11, even if building headless only, libawt still
+-    # needs X11 headers.
++    # All other instances need X11
+     NEEDS_LIB_X11=true
+   fi
+ 
