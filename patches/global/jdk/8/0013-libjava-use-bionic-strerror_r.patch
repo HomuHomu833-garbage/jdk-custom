@@ -1,0 +1,31 @@
+libjava: use bionic's strerror_r, not glibc's __xpg_strerror_r
+
+getErrorString() wants the XSI strerror_r, the one returning int. Under
+_GNU_SOURCE glibc gives the GNU variant instead, which returns char*, so the
+file redirects the call to glibc's internal __xpg_strerror_r. The build defines
+_GNU_SOURCE for linux, so that redirect is taken on android too and libjava
+fails to link:
+
+  ld.lld: error: undefined symbol: __xpg_strerror_r
+  >>> referenced by jni_util_md.o:(getErrorString)
+
+bionic has no such symbol and needs none: its strerror_r is already the XSI one
+with exactly the signature this code expects. Exclude android from the redirect
+and let the call go straight through.
+
+Matches termux-packages' 0008-Use-Android-s-strerror_r. 11+ restructured this
+code and are unaffected.
+
+diff --git a/jdk/src/solaris/native/common/jni_util_md.c b/jdk/src/solaris/native/common/jni_util_md.c
+index 598dc41..147c828 100644
+--- a/jdk/src/solaris/native/common/jni_util_md.c
++++ b/jdk/src/solaris/native/common/jni_util_md.c
+@@ -37,7 +37,7 @@ char* nativeGetStringPlatformChars(JNIEnv *env, jstring jstr, jboolean *isCopy)
+     return NULL;
+ }
+ 
+-#if defined(LINUX) && (defined(_GNU_SOURCE) || \
++#if defined(LINUX) && !defined(__ANDROID__) && (defined(_GNU_SOURCE) || \
+          (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE < 200112L \
+              && defined(_XOPEN_SOURCE) && _XOPEN_SOURCE < 600))
+ extern int __xpg_strerror_r(int, char *, size_t);
