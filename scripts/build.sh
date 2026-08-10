@@ -368,6 +368,28 @@ if [ "$PLATFORM" = android ]; then
   # leaving the script's meaning intact for every symbol that is — cheaper than
   # patching version-script-clang.txt in each release.
   EXTRA_CONF+=(--with-extra-ldflags="-L$STUB_DIR -Wl,--undefined-version")
+
+  # 8: drop the Serviceability Agent's native half. libsaproc talks to
+  # libthread_db through <thread_db.h>, which bionic has no equivalent of:
+  #   proc_service.h:29:10: fatal error: 'thread_db.h' file not found
+  # 11+ get this from patch 0011, which can gate on OPENJDK_TARGET_LIBC; 8's
+  # hotspot makefiles are handed no libc information at all, so do it here where
+  # the platform is known. Two edits, because the export list demands the
+  # library independently of whether anything built it. sa-jdi.jar, the pure
+  # Java half, is untouched — as on 11+, only the native debugging bridge goes.
+  if [ "$JDK_VERSION" = 8 ]; then
+    SA_MAKE="$SRC/hotspot/make/linux/makefiles/saproc.make"
+    HS_DEFS="$SRC/hotspot/make/linux/makefiles/defs.make"
+    for f in "$SA_MAKE" "$HS_DEFS"; do
+      [ -f "$f" ] || { echo "expected $f in the jdk8 hotspot tree" >&2; exit 1; }
+    done
+    grep -q 'ifneq ($(wildcard $(AGENT_DIR)),)' "$SA_MAKE" || {
+      echo "unexpected $SA_MAKE: no AGENT_DIR guard to disable" >&2; exit 1; }
+    grep -q 'EXPORT_LIST += $(ADD_SA_BINARIES/$(HS_ARCH))' "$HS_DEFS" || {
+      echo "unexpected $HS_DEFS: no SA export line to drop" >&2; exit 1; }
+    sed -i 's|^ifneq (\$(wildcard \$(AGENT_DIR)),)$|ifeq (skip-saproc, build-saproc)|' "$SA_MAKE"
+    sed -i 's|^EXPORT_LIST += \$(ADD_SA_BINARIES/\$(HS_ARCH))$|# libsaproc skipped: bionic has no thread_db.h|' "$HS_DEFS"
+  fi
 fi
 
 # --- libffi (Zero only) -----------------------------------------------------
@@ -407,7 +429,18 @@ if [ "$JVM_VARIANT" = zero ]; then
     [ -f "$FFI_PREFIX/lib/libffi.a" ] || {
       echo "libffi build did not produce $FFI_PREFIX/lib/libffi.a" >&2; exit 1; }
   fi
-  EXTRA_CONF+=(--with-libffi-include="$FFI_PREFIX/include" --with-libffi-lib="$FFI_PREFIX/lib")
+  # 8 has no --with-libffi-include/--with-libffi-lib; its configure only does
+  # PKG_CHECK_MODULES([LIBFFI], [libffi]) and would reject them outright
+  # ("configure: error: unrecognized options"). Point pkg-config at the libffi
+  # just built instead — the .pc file installed alongside it carries the same
+  # include and lib paths those options would have named.
+  if [ "$JDK_VERSION" = 8 ]; then
+    [ -f "$FFI_PREFIX/lib/pkgconfig/libffi.pc" ] || {
+      echo "libffi built without a pkg-config file at $FFI_PREFIX/lib/pkgconfig" >&2; exit 1; }
+    export PKG_CONFIG_PATH="$FFI_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  else
+    EXTRA_CONF+=(--with-libffi-include="$FFI_PREFIX/include" --with-libffi-lib="$FFI_PREFIX/lib")
+  fi
 fi
 
 # --- headers-only deps (cups, fontconfig, X11) ------------------------------

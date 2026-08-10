@@ -1,0 +1,30 @@
+aarch64: use prfum for the negative prefetch offset
+
+copy_linux_aarch64.s prefetches backwards with a scaled prfm:
+
+  prfm    pldl1keep, [s, #-256]
+
+The scaled form only encodes non-negative multiples of 8, so clang's
+integrated assembler rejects it:
+
+  copy_linux_aarch64.s:332:32: error: index must be a multiple of 8 in
+      range [0, 32760].
+
+The unscaled form, prfum, is what takes a negative offset -- and the very same
+file already uses it for the matching prefetch a hundred lines earlier, so this
+just makes the two agree. GNU as accepts either spelling, which is why it went
+unnoticed upstream.
+
+diff --git a/hotspot/src/os_cpu/linux_aarch64/vm/copy_linux_aarch64.s b/hotspot/src/os_cpu/linux_aarch64/vm/copy_linux_aarch64.s
+index 6d00d9f..e7f9215 100644
+--- a/hotspot/src/os_cpu/linux_aarch64/vm/copy_linux_aarch64.s
++++ b/hotspot/src/os_cpu/linux_aarch64/vm/copy_linux_aarch64.s
+@@ -329,7 +329,7 @@ unal_bwd_copy:
+         blo     unal_bwd_copy_drain
+ 
+ unal_bwd_copy_again:
+-        prfm    pldl1keep, [s, #-256]
++        prfum   pldl1keep, [s, #-256]
+         str     t1, [d, #-8]
+         stp     t3, t0, [d, #-24]
+         ldp     t0, t1, [s, #-16]
