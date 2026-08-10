@@ -1,23 +1,32 @@
-libjava: use bionic's strerror_r, not glibc's __xpg_strerror_r
+libjava: use bionic's strerror_r, and take its return type
 
-getErrorString() wants the XSI strerror_r, the one returning int. Under
-_GNU_SOURCE glibc gives the GNU variant instead, which returns char*, so the
-file redirects the call to glibc's internal __xpg_strerror_r. The build defines
-_GNU_SOURCE for linux, so that redirect is taken on android too and libjava
-fails to link:
+Two things had to change together, and the first alone left the build worse
+than before.
+
+getErrorString() wants the XSI strerror_r that returns int. Under _GNU_SOURCE
+glibc supplies the GNU one returning char*, so the file redirects the call to
+glibc's internal __xpg_strerror_r. The build defines _GNU_SOURCE for linux, so
+android took that path and libjava did not link:
 
   ld.lld: error: undefined symbol: __xpg_strerror_r
-  >>> referenced by jni_util_md.o:(getErrorString)
 
-bionic has no such symbol and needs none: its strerror_r is already the XSI one
-with exactly the signature this code expects. Exclude android from the redirect
-and let the call go straight through.
+Dropping the redirect exposed the reason it existed: bionic follows glibc here,
+so under _GNU_SOURCE its strerror_r returns char* too, and the function does
+not compile:
 
-Matches termux-packages' 0008-Use-Android-s-strerror_r. 11+ restructured this
-code and are unaffected.
+  jni_util_md.c:73:12: error: incompatible pointer to integer conversion
+      returning 'char * _Nonnull' from a function with result type 'int'
+
+So handle the GNU form on android: copy the message into buf when the call
+returns a static string, and report success the way the XSI call would.
+
+termux-packages changes getErrorString's signature to char* instead
+(0029-libjava-change-return-type-of-strerror_r). Keeping int avoids touching
+jni_util.h and every caller; both callers in 8 ignore the return value and read
+buf -- io_util_md.c takes strlen(buf), getLastErrorString checks buf[0].
 
 diff --git a/jdk/src/solaris/native/common/jni_util_md.c b/jdk/src/solaris/native/common/jni_util_md.c
-index 598dc41..147c828 100644
+index 598dc41..154afa3 100644
 --- a/jdk/src/solaris/native/common/jni_util_md.c
 +++ b/jdk/src/solaris/native/common/jni_util_md.c
 @@ -37,7 +37,7 @@ char* nativeGetStringPlatformChars(JNIEnv *env, jstring jstr, jboolean *isCopy)
@@ -29,3 +38,23 @@ index 598dc41..147c828 100644
           (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE < 200112L \
               && defined(_XOPEN_SOURCE) && _XOPEN_SOURCE < 600))
  extern int __xpg_strerror_r(int, char *, size_t);
+@@ -70,5 +70,19 @@ int
+ getErrorString(int err, char *buf, size_t len)
+ {
+     if (err == 0 || len < 1) return 0;
++#ifdef __ANDROID__
++    /* bionic follows glibc here: under _GNU_SOURCE strerror_r returns char*,
++     * and may hand back a static string instead of filling buf. Copy it in and
++     * report success, which is what the XSI call would have done. */
++    {
++        char *msg = strerror_r(err, buf, len);
++        if (msg != buf) {
++            strncpy(buf, msg, len - 1);
++            buf[len - 1] = '\0';
++        }
++        return 0;
++    }
++#else
+     return strerror_r(err, buf, len);
++#endif
+ }
