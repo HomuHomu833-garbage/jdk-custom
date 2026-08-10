@@ -485,8 +485,15 @@ if [ "$TARGET_OS" = linux ] || [ "$TARGET_OS" = bsd ]; then
     mkdir -p "$DEP_INC"
     cp -R "/usr/include/$dep" "$DEP_INC/"
   done
+  # 8 has no --disable-warnings-as-errors. Patch 0003 empties hotspot's own
+  # -Werror, but the JDK-side native libraries carry their own, and bionic
+  # differs from glibc in ways that trip it — socklen_t is signed there, so
+  # SctpNet.c fails on -Wpointer-sign. Turn errors back into warnings, matching
+  # what every other release here is configured with.
+  EXTRA_CFLAGS="-I$DEP_INC"
+  [ "$JDK_VERSION" = 8 ] && EXTRA_CFLAGS="$EXTRA_CFLAGS -Wno-error"
   EXTRA_CONF+=(--with-cups-include="$DEP_INC" --with-fontconfig-include="$DEP_INC"
-               --with-extra-cflags="-I$DEP_INC")
+               --with-extra-cflags="$EXTRA_CFLAGS")
 fi
 
 # --- a config.sub that knows android ----------------------------------------
