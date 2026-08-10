@@ -1,0 +1,35 @@
+os_linux_zero: don't redefine clang's __sync builtin
+
+Zero supplies a ShouldNotCallThis() stub for __sync_val_compare_and_swap_8 on
+32-bit targets, for platforms whose compiler emits a libcall for 64-bit atomics.
+clang treats that name as one of its own builtins and refuses the definition:
+
+  os_linux_zero.cpp:486:26: error: cannot redeclare builtin function
+      '__sync_val_compare_and_swap_8'
+
+Skip the stub under clang. It is not needed there: on the 32-bit ARM target
+built here clang expands 64-bit compare-and-swap inline with LDREXD/STREXD
+rather than calling out to a helper, and the stub only ever aborted anyway.
+
+diff --git a/hotspot/src/os_cpu/linux_zero/vm/os_linux_zero.cpp b/hotspot/src/os_cpu/linux_zero/vm/os_linux_zero.cpp
+index 84d29b2..4abf63e 100644
+--- a/hotspot/src/os_cpu/linux_zero/vm/os_linux_zero.cpp
++++ b/hotspot/src/os_cpu/linux_zero/vm/os_linux_zero.cpp
+@@ -481,7 +481,7 @@ extern "C" {
+ // Implementations of atomic operations not supported by processors.
+ //  -- http://gcc.gnu.org/onlinedocs/gcc-4.2.1/gcc/Atomic-Builtins.html
+ 
+-#ifndef _LP64
++#if !defined(_LP64) && !defined(__clang__)
+ extern "C" {
+   long long unsigned int __sync_val_compare_and_swap_8(
+     volatile void *ptr,
+@@ -491,7 +491,7 @@ extern "C" {
+     return 0; // silence compiler warnings
+   }
+ };
+-#endif // !_LP64
++#endif // !_LP64 && !__clang__
+ 
+ #ifndef PRODUCT
+ void os::verify_stack_alignment() {

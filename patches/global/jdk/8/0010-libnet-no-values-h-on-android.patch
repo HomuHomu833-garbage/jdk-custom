@@ -1,0 +1,32 @@
+libnet: no <values.h> on android
+
+net_util_md.c reaches for the legacy SysV header <values.h>, which bionic does
+not ship:
+
+  net_util_md.c:39:10: fatal error: 'values.h' file not found
+
+MAXINT is the only thing it takes from there, and the file already has a
+fallback for it -- the _ALLBSD_SOURCE branch defines MAXINT from INT_MAX.
+Give android the same treatment in its own branch rather than folding it into
+the BSD one, which also pulls <sys/param.h> and <sys/sysctl.h>; sysctl is not
+something to lean on in a current NDK.
+
+diff --git a/jdk/src/solaris/native/java/net/net_util_md.c b/jdk/src/solaris/native/java/net/net_util_md.c
+index bd0bd8c..d849c67 100644
+--- a/jdk/src/solaris/native/java/net/net_util_md.c
++++ b/jdk/src/solaris/native/java/net/net_util_md.c
+@@ -35,7 +35,13 @@
+ #include <dlfcn.h>
+ #include <sys/time.h>
+ 
+-#ifndef _ALLBSD_SOURCE
++#if defined(__ANDROID__)
++/* bionic has no <values.h>; MAXINT is all this file wants from it. */
++#include <limits.h>
++#ifndef MAXINT
++#define MAXINT INT_MAX
++#endif
++#elif !defined(_ALLBSD_SOURCE)
+ #include <values.h>
+ #else
+ #include <limits.h>

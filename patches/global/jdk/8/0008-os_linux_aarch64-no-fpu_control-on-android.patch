@@ -1,0 +1,28 @@
+os_linux_aarch64: no <fpu_control.h> on android
+
+The aarch64 os layer includes glibc's <fpu_control.h>, which bionic has no
+equivalent of:
+
+  os_linux_aarch64.cpp:75:11: fatal error: 'fpu_control.h' file not found
+
+Nothing in the file needs it: init_thread_fpu_state() is empty,
+get_fpu_control_word() returns 0 and set_fpu_control_word() does nothing --
+aarch64 has no x87 control word to manage. Guard the include and leave the
+stubs alone.
+
+Companion to 0006, which does the same for the x86 os layer.
+
+diff --git a/hotspot/src/os_cpu/linux_aarch64/vm/os_linux_aarch64.cpp b/hotspot/src/os_cpu/linux_aarch64/vm/os_linux_aarch64.cpp
+index db1cb10..70a8896 100644
+--- a/hotspot/src/os_cpu/linux_aarch64/vm/os_linux_aarch64.cpp
++++ b/hotspot/src/os_cpu/linux_aarch64/vm/os_linux_aarch64.cpp
+@@ -72,7 +72,9 @@
+ # include <pwd.h>
+ # include <poll.h>
+ # include <ucontext.h>
++#ifndef __ANDROID__
+ # include <fpu_control.h>
++#endif
+ 
+ #define REG_FP 29
+ 
