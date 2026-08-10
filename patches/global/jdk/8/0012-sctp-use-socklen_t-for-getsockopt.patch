@@ -1,0 +1,36 @@
+sctp: pass socklen_t to getsockopt, not unsigned int
+
+getPrimAddrOption0 and getInitMsgOption0 declare their getsockopt length as
+unsigned int. glibc's socklen_t is unsigned int so it goes unnoticed there;
+bionic's is signed, and libsctp is built with -Werror:
+
+  SctpNet.c:593:64: error: passing 'unsigned int *' to parameter of type
+      'socklen_t * _Nonnull' (aka 'int *') converts between pointers to
+      integer types with different sign [-Werror,-Wpointer-sign]
+
+Use the type getsockopt actually takes. Every other call in this file already
+does, and it is correct on both libcs rather than only on the one where the
+two types happen to coincide.
+
+diff --git a/jdk/src/solaris/native/sun/nio/ch/sctp/SctpNet.c b/jdk/src/solaris/native/sun/nio/ch/sctp/SctpNet.c
+index 51ffa24..0b4dc03 100644
+--- a/jdk/src/solaris/native/sun/nio/ch/sctp/SctpNet.c
++++ b/jdk/src/solaris/native/sun/nio/ch/sctp/SctpNet.c
+@@ -585,7 +585,7 @@ JNIEXPORT int JNICALL Java_sun_nio_ch_sctp_SctpNet_getIntOption0
+ JNIEXPORT jobject JNICALL Java_sun_nio_ch_sctp_SctpNet_getPrimAddrOption0
+   (JNIEnv *env, jclass klass, jint fd, jint assocId) {
+     struct sctp_setprim prim;
+-    unsigned int prim_len = sizeof(prim);
++    socklen_t prim_len = sizeof(prim);
+     struct sockaddr* sap = (struct sockaddr*)&prim.ssp_addr;
+ 
+     prim.ssp_assoc_id = assocId;
+@@ -657,7 +657,7 @@ JNIEXPORT void JNICALL Java_sun_nio_ch_sctp_SctpNet_setPeerPrimAddrOption0
+ JNIEXPORT void JNICALL Java_sun_nio_ch_sctp_SctpNet_getInitMsgOption0
+   (JNIEnv *env, jclass klass, jint fd, jintArray retVal) {
+     struct sctp_initmsg sctp_initmsg;
+-    unsigned int sim_len = sizeof(sctp_initmsg);
++    socklen_t sim_len = sizeof(sctp_initmsg);
+     int vals[2];
+ 
+     if (getsockopt(fd, IPPROTO_SCTP, SCTP_INITMSG, &sctp_initmsg,

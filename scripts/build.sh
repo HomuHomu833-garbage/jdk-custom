@@ -600,7 +600,15 @@ fi
 # --- build ------------------------------------------------------------------
 log "Building (make images)"
 if [ "$JDK_VERSION" = 8 ]; then
-  make images
+  # --disable-headful does not reach the makefiles on 8: configure emits
+  # BUILD_HEADLESS:=true into spec.gmk, but Awt2dLibraries.gmk,
+  # CompileLaunchers.gmk and CompileJavaClasses.gmk all gate on
+  # BUILD_HEADLESS_ONLY, which nothing ever sets. So libawt_xawt gets built
+  # regardless — it wants glibc's <execinfo.h> backtrace(), which bionic has
+  # no equivalent of, and it would then try to link the X11 libraries this
+  # repository only stages headers for. Set the variable the makefiles are
+  # actually looking for.
+  make BUILD_HEADLESS_ONLY=true images
 else
   make CONF="$CONF" images
 fi
