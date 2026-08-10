@@ -519,6 +519,28 @@ if [ -f "$CONFIG_SUB_DIR/config.sub" ] \
     echo "refreshed config.sub still cannot parse '$TARGET'" >&2; exit 1; }
 fi
 
+# --- jdk8: give the clang toolchain a PIC flag ------------------------------
+# 8 sets PICFLAG only for gcc; the clang branch leaves it empty, because 8's
+# clang support was written for macosx, where PIC is the default and saying so
+# is unnecessary. Everywhere else that means the JDK's own shared libraries are
+# compiled without -fPIC and every one of them fails to link:
+#   ld.lld: error: relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against
+#   symbol 'TT_RunIns'; recompile with -fPIC
+# Give clang what gcc gets, except where the flag is meaningless: macosx has PIC
+# by default, and windows has no such concept. 8 ships a checked-in
+# generated-configure.sh alongside the .m4, so both carry the change.
+if [ "$JDK_VERSION" = 8 ]; then
+  pic_patched=0
+  for f in "$SRC/common/autoconf/flags.m4" "$SRC/common/autoconf/generated-configure.sh"; do
+    [ -f "$f" ] || continue
+    grep -q "^      PICFLAG=''\$" "$f" || continue
+    sed -i "s%^      PICFLAG=''\$%      case \$OPENJDK_TARGET_OS in\n        macosx|windows) PICFLAG='' ;;\n        *) PICFLAG='-fPIC' ;;\n      esac%" "$f"
+    pic_patched=1
+  done
+  [ "$pic_patched" = 1 ] || {
+    echo "unexpected jdk8 tree: no empty clang PICFLAG to set" >&2; exit 1; }
+fi
+
 # --- configure --------------------------------------------------------------
 CONF="custom-$TARGET"
 IMAGE_DIR="$SRC/build/$CONF/images/jdk"
