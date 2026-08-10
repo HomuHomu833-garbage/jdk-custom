@@ -28,6 +28,26 @@ Thread::current() instead, as termux-packages does in
 with a lowercase extension, so the compiler never preprocesses it and it cannot
 guard itself. The gate is the OPENJDK_TARGET_LIBC test patch 0011 already uses.
 
+CompileGtest.gmk needs the same exclusion spelled out again: it builds its own
+copy of libjvm and hardcodes EXCLUDE_FILES to gtestLauncher.cpp rather than
+inheriting JVM_EXCLUDE_FILES, so the first attempt at this patch fixed the real
+libjvm.so and left the gtest one still assembling the TLSDESC sequence -- which
+is the copy gtestLauncher links against, so the build failed in exactly the
+same place.
+
+diff --git a/make/hotspot/lib/CompileGtest.gmk b/make/hotspot/lib/CompileGtest.gmk
+index f6af4d3..bb37a23 100644
+--- a/make/hotspot/lib/CompileGtest.gmk
++++ b/make/hotspot/lib/CompileGtest.gmk
+@@ -66,7 +66,7 @@ $(eval $(call SetupNativeCompilation, BUILD_GTEST_LIBJVM, \
+     OBJECT_DIR := $(JVM_OUTPUTDIR)/gtest/objs, \
+     SRC := $(GTEST_TEST_SRC), \
+     EXCLUDES := $(JVM_EXCLUDES), \
+-    EXCLUDE_FILES := gtestLauncher.cpp, \
++    EXCLUDE_FILES := gtestLauncher.cpp $(JVM_EXCLUDE_FILES), \
+     EXCLUDE_PATTERNS := $(JVM_EXCLUDE_PATTERNS), \
+     EXTRA_FILES := $(GTEST_FRAMEWORK_SRC)/src/gtest-all.cc, \
+     EXTRA_OBJECT_FILES := $(filter-out %/operator_new$(OBJ_SUFFIX), \
 diff --git a/make/hotspot/lib/CompileJvm.gmk b/make/hotspot/lib/CompileJvm.gmk
 index 48e75e2..8aca7bc 100644
 --- a/make/hotspot/lib/CompileJvm.gmk
