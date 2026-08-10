@@ -500,7 +500,12 @@ if [ "$JDK_VERSION" = 8 ]; then
   # unlimited-strength JCE policy (default on 11+, opt-in on 8) so full-strength
   # ciphers work out of the box. Neither --disable-warnings-as-errors nor
   # --with-build-user exists yet in 8, and configure makes unknown options fatal,
-  # so both are left off.
+  # so both are left off. BUILD_CC/BUILD_CXX matter more here than on 11+:
+  # hotspot-spec.gmk.in maps BUILD_CXX onto hotspot's HOSTCXX, which builds adlc
+  # — and hotspot hands that host tool the *target* compiler's flags, so with the
+  # NDK clang as CXX it adds -flimit-debug-info and host g++ refuses it
+  # ("g++: error: unrecognized command-line option '-flimit-debug-info'").
+  # Building adlc with clang too keeps the flags and the compiler in agreement.
   bash ./configure \
     --host="$TARGET" \
     --target="$TARGET" \
@@ -511,6 +516,8 @@ if [ "$JDK_VERSION" = 8 ]; then
     --disable-headful \
     --with-freetype=bundled \
     --enable-unlimited-crypto \
+    BUILD_CC=clang \
+    BUILD_CXX=clang++ \
     "${EXTRA_CONF[@]}"
   CONF8="$(ls -d "$SRC"/build/*/ 2>/dev/null | head -n1)"
   IMAGE_DIR="${CONF8%/}/images/j2sdk-image"
