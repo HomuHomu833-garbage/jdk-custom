@@ -1,0 +1,32 @@
+jawt: return "no AWT" for any headless-only build, not just embedded
+
+libjawt fails to link once the build is genuinely headless:
+
+  ld.lld: error: undefined symbol: awt_GetDrawingSurface
+  >>> referenced by jawt.o:(JAWT_GetAWT)
+
+The makefile already anticipates this: with BUILD_HEADLESS_ONLY it links
+libjawt against -lawt_headless and compiles it with -DHEADLESS. jawt.c has the
+matching branch -- JAWT_GetAWT returning JNI_FALSE, commented "there are no AWT
+libs available at all" -- but gates it on JAVASE_EMBEDDED as well, so a
+headless build outside the embedded profile falls through to the code that
+wires up the X11 drawing-surface entry points.
+
+Those symbols live in libawt_xawt, which a headless-only build never produces,
+so the branch applies whenever HEADLESS is defined. Widening the guard leaves
+the embedded case exactly as it was and fixes every other headless build.
+
+diff --git a/jdk/src/solaris/native/sun/awt/jawt.c b/jdk/src/solaris/native/sun/awt/jawt.c
+index 64284bc..5d37e3d 100644
+--- a/jdk/src/solaris/native/sun/awt/jawt.c
++++ b/jdk/src/solaris/native/sun/awt/jawt.c
+@@ -33,7 +33,8 @@
+  */
+ JNIEXPORT jboolean JNICALL JAWT_GetAWT(JNIEnv* env, JAWT* awt)
+ {
+-#if defined(JAVASE_EMBEDDED) && defined(HEADLESS)
++/* A headless-only build has no libawt_xawt at all, embedded profile or not. */
++#if defined(HEADLESS)
+     /* there are no AWT libs available at all */
+     return JNI_FALSE;
+ #else
