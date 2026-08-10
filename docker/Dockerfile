@@ -22,9 +22,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 # image assembly + configure probes. aria2/xz/git: fetch + unpack. p7zip-full:
 # 7z archives for the windows builds. python3: parse the Adoptium GA feed.
 # clang/lld + lib*-dev/cpio/bzip2: build osxcross (cctools-port) at image time.
-# libcups2-dev/libfontconfig-dev: headers only, staged per target by build.sh —
-# OpenJDK needs them to compile libawt_headless even for a headless build; both
-# libraries are dlopened at run time, never linked. ALSA is deliberately absent:
+# libcups2-dev/libfontconfig-dev/libx*-dev: headers only, staged per target by
+# build.sh — OpenJDK needs them to compile libawt_headless even for a headless
+# build; cups and fontconfig are dlopened at run time, never linked, and X11 is
+# only linked by the headful libawt_xawt, which a headless build never produces.
+# 11, 17 and 21 include <X11/Xlib.h> from libawt's rect.h regardless of
+# --enable-headless-only, which is what makes the X11 headers necessary here. ALSA is deliberately absent:
 # build.sh drops sound from the linux/android targets, since no cross sysroot here
 # has ALSA to build against.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -32,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential clang lld file cpio bzip2 python3 cmake \
         libcups2-dev libfontconfig-dev libxml2-dev liblzma-dev uuid-dev \
         zlib1g-dev libssl-dev \
+        libx11-dev libxext-dev libxrender-dev libxrandr-dev libxtst-dev libxt-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # fetch: aria2c with retries (transient GitHub/Adoptium 5xx). build scripts reuse it.

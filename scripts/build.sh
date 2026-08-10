@@ -402,7 +402,7 @@ if [ "$JVM_VARIANT" = zero ]; then
   EXTRA_CONF+=(--with-libffi-include="$FFI_PREFIX/include" --with-libffi-lib="$FFI_PREFIX/lib")
 fi
 
-# --- headers-only deps (cups, fontconfig) -----------------------------------
+# --- headers-only deps (cups, fontconfig, X11) ------------------------------
 # configure requires both for every target except windows/macosx (NEEDS_LIB_CUPS
 # / NEEDS_LIB_FONTCONFIG), and --enable-headless-only does not exempt them:
 # libawt_headless compiles CUPSfuncs.c and fontpath.c. Neither is ever linked —
@@ -412,16 +412,27 @@ fi
 # being pure API they serve every target. Stage them in a private include dir
 # instead of passing /usr/include, whose -I would be searched ahead of the
 # target's own libc headers and shadow them.
+#
+# X11 rides along for the same reason. 11, 17 and 21 all compile libawt against
+# it whatever --enable-headless-only says — rect.h pulls in <X11/Xlib.h>, so the
+# build stops with "fatal error: 'X11/Xlib.h' file not found" — while only the
+# headful libawt_xawt, which a headless build never produces, links against the
+# libraries. 25 dropped the include and needs none of this; the extra -I is
+# harmless there. Passing -I directly rather than through --x-includes is what
+# makes this work across all of them: 17 and 25 answer "X11 not needed" and
+# clear X_CFLAGS, so anything routed through configure's X11 support is dropped
+# before it reaches the compiler.
 if [ "$TARGET_OS" = linux ] || [ "$TARGET_OS" = bsd ]; then
   DEP_INC="$BUILD_DIR/dep-include"
-  for dep in cups fontconfig; do
+  for dep in cups fontconfig X11; do
     [ -d "$DEP_INC/$dep" ] && continue
     [ -d "/usr/include/$dep" ] || {
       echo "$dep headers missing from the builder image (see docker/Dockerfile)" >&2; exit 1; }
     mkdir -p "$DEP_INC"
     cp -R "/usr/include/$dep" "$DEP_INC/"
   done
-  EXTRA_CONF+=(--with-cups-include="$DEP_INC" --with-fontconfig-include="$DEP_INC")
+  EXTRA_CONF+=(--with-cups-include="$DEP_INC" --with-fontconfig-include="$DEP_INC"
+               --with-extra-cflags="-I$DEP_INC")
 fi
 
 # --- a config.sub that knows android ----------------------------------------

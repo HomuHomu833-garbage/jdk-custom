@@ -1,0 +1,28 @@
+jvm_linux: guard the SIGCLD table entry
+
+The signal-name table lists "CLD" alongside "CHLD". SIGCLD is the System V
+alias, which glibc provides and bionic does not, so the array initialiser fails
+to compile and takes the rest of the file with it:
+
+  jvm_linux.cpp:157:17: error: use of undeclared identifier 'SIGCLD'
+  jvm_linux.cpp:182:19: error: invalid application of 'sizeof' to an incomplete
+      type 'struct siglabel[]'
+
+Wrap it in #ifdef the way the neighbouring SIGSTKFLT and SIGSYS entries already
+are. Nothing is lost on android: SIGCLD is only ever the same number as
+SIGCHLD, and that entry is right below it.
+
+diff --git a/hotspot/src/os/linux/vm/jvm_linux.cpp b/hotspot/src/os/linux/vm/jvm_linux.cpp
+index ba84788..c22281f 100644
+--- a/hotspot/src/os/linux/vm/jvm_linux.cpp
++++ b/hotspot/src/os/linux/vm/jvm_linux.cpp
+@@ -154,7 +154,9 @@ struct siglabel siglabels[] = {
+ #ifdef SIGSTKFLT
+   "STKFLT",     SIGSTKFLT,      /* Stack fault.  */
+ #endif
++#ifdef SIGCLD
+   "CLD",        SIGCLD,         /* Same as SIGCHLD (System V).  */
++#endif
+   "CHLD",       SIGCHLD,        /* Child status has changed (POSIX).  */
+   "CONT",       SIGCONT,        /* Continue (POSIX).  */
+   "STOP",       SIGSTOP,        /* Stop, unblockable (POSIX).  */
