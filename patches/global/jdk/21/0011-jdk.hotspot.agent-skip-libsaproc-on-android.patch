@@ -1,0 +1,37 @@
+jdk.hotspot.agent: don't build libsaproc on android
+
+ps_core.c reads prstatus_t out of a core file's NT_PRSTATUS notes. That type
+comes from <sys/procfs.h>, which bionic does not ship, so the library cannot
+compile at all:
+
+  ps_core.c:190:4: error: use of undeclared identifier 'prstatus_t'
+
+libsaproc is the native half of the Serviceability Agent (jhsdb, jmap -F and
+friends) -- a post-mortem debugger, not something the JVM needs to run. Drop
+it on android the way termux-packages does
+(0005-android-prevent-build-of-libsa), but gate the change instead of removing
+the target outright, so the linux/macos/windows builds here keep their SA.
+
+The gate keys on OPENJDK_TARGET_OS plus OPENJDK_TARGET_LIBC: android is the
+only linux target whose libc configure reports as neither gnu nor musl.
+
+diff --git a/make/modules/jdk.hotspot.agent/Lib.gmk b/make/modules/jdk.hotspot.agent/Lib.gmk
+index d21c969..1f1f0cb 100644
+--- a/make/modules/jdk.hotspot.agent/Lib.gmk
++++ b/make/modules/jdk.hotspot.agent/Lib.gmk
+@@ -77,6 +77,14 @@ $(eval $(call SetupJdkLibrary, BUILD_LIBSA, \
+     LIBS_windows := dbgeng.lib $(WIN_JAVA_LIB), \
+ ))
+ 
+-TARGETS += $(BUILD_LIBSA)
++# libsaproc's core-file reader needs prstatus_t from <sys/procfs.h>, which
++# bionic does not ship. Android is the linux target whose libc configure
++# reports as neither gnu nor musl, so skip the library there and leave every
++# other target building it.
++SA_ON_BIONIC := $(if $(filter linux, $(OPENJDK_TARGET_OS)),$(if $(filter gnu musl, $(OPENJDK_TARGET_LIBC)),,true))
++
++ifneq ($(SA_ON_BIONIC), true)
++  TARGETS += $(BUILD_LIBSA)
++endif
+ 
+ ################################################################################

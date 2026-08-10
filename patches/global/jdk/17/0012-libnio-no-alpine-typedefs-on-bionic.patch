@@ -1,0 +1,27 @@
+libnio: don't apply the Alpine statx typedefs on bionic
+
+UnixNativeDispatcher.c defines __uint32_t/__uint16_t/__uint64_t itself for
+non-glibc libcs, because musl has no such names and the file's own statx
+structs need them. bionic does have them, spelled differently -- its
+__uint64_t is unsigned long long, the fallback here is unsigned long -- so the
+32-bit android targets stop on a redefinition:
+
+  UnixNativeDispatcher.c:77:28: error: typedef redefinition with different
+  types ('unsigned long' vs 'unsigned long long')
+
+Narrow the fallback to libcs that actually lack the types, as
+termux-packages' OUTTREE-bionic-type-redef-fix does.
+
+diff --git a/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c b/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c
+index 7bc14a0..4bb29ec 100644
+--- a/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c
++++ b/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c
+@@ -79,7 +79,7 @@
+ // by defining binary compatible statx structs in this file and
+ // not relying on included headers.
+ 
+-#ifndef __GLIBC__
++#if !defined(__BIONIC__) && !defined(__GLIBC__)
+ // Alpine doesn't know these types, define them
+ typedef unsigned int       __uint32_t;
+ typedef unsigned short     __uint16_t;
