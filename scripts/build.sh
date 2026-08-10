@@ -405,9 +405,15 @@ if [ "$PLATFORM" = android ]; then
   #   proc_service.h:29:10: fatal error: 'thread_db.h' file not found
   # 11+ get this from patch 0011, which can gate on OPENJDK_TARGET_LIBC; 8's
   # hotspot makefiles are handed no libc information at all, so do it here where
-  # the platform is known. Two edits, because the export list demands the
-  # library independently of whether anything built it. sa-jdi.jar, the pure
-  # Java half, is untouched — as on 11+, only the native debugging bridge goes.
+  # the platform is known. Two edits: stop saproc.make building the library, and
+  # take it out of the export list, which demands it whether or not anything
+  # built it. Only the libsaproc entry goes -- ADD_SA_BINARIES also names
+  # sa-jdi.jar, which is pure Java, builds from sa.make regardless, and is what
+  # the images stage goes looking for:
+  #   No rule to make target '.../jdk/lib/sa-jdi.jar', needed by
+  #   '.../images/lib/sa-jdi.jar'
+  # Editing the entry rather than the EXPORT_LIST line also keeps the per-arch
+  # gating, so the Zero targets that never had SA stay untouched.
   if [ "$JDK_VERSION" = 8 ]; then
     SA_MAKE="$SRC/hotspot/make/linux/makefiles/saproc.make"
     HS_DEFS="$SRC/hotspot/make/linux/makefiles/defs.make"
@@ -416,10 +422,10 @@ if [ "$PLATFORM" = android ]; then
     done
     grep -q 'ifneq ($(wildcard $(AGENT_DIR)),)' "$SA_MAKE" || {
       echo "unexpected $SA_MAKE: no AGENT_DIR guard to disable" >&2; exit 1; }
-    grep -q 'EXPORT_LIST += $(ADD_SA_BINARIES/$(HS_ARCH))' "$HS_DEFS" || {
-      echo "unexpected $HS_DEFS: no SA export line to drop" >&2; exit 1; }
+    grep -q 'libsaproc\.$(LIBRARY_SUFFIX)' "$HS_DEFS" || {
+      echo "unexpected $HS_DEFS: no libsaproc export to drop" >&2; exit 1; }
     sed -i 's|^ifneq (\$(wildcard \$(AGENT_DIR)),)$|ifeq (skip-saproc, build-saproc)|' "$SA_MAKE"
-    sed -i 's|^EXPORT_LIST += \$(ADD_SA_BINARIES/\$(HS_ARCH))$|# libsaproc skipped: bionic has no thread_db.h|' "$HS_DEFS"
+    perl -pi -e 's/ \$\(EXPORT_JRE_LIB_ARCH_DIR\)\/libsaproc\.\$\(LIBRARY_SUFFIX\)//g' "$HS_DEFS"
   fi
 fi
 
