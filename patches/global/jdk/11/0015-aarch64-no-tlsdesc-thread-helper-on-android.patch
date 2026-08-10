@@ -1,6 +1,6 @@
 aarch64: don't reach Thread::_thr_current through TLSDESC on android
 
-threadLS_linux_aarch64 reads the current thread out of a TLS slot with the
+threadLS_linux_aarch64.s reads the current thread out of a TLS slot with the
 TLSDESC sequence:
 
   adrp x0, :tlsdesc:_ZN6Thread12_thr_currentE
@@ -10,64 +10,17 @@ bionic's linker does not support TLSDESC relocations at the API level built
 here, so the reference cannot be resolved and libjvm.so is left with an
 undefined Thread::_thr_current. Shared libraries tolerate that at link time,
 which is why it stays invisible -- until something links an executable against
-libjvm.so:
+libjvm.so, which on 11 is gtestLauncher:
 
   ld.lld: error: undefined reference due to --no-allow-shlib-undefined:
       Thread::_thr_current
 
-11 is the release that surfaced it, because it bundles googletest and builds
-gtestLauncher; 17 and up need --with-gtest and never link such a binary. The
-relocation is identical in all of them, so all of them get the fix.
+17 and up guard the same assembly with #ifndef __ANDROID__ in their patch 0015.
+11 cannot: its copy is threadLS_linux_aarch64.s with a lowercase extension, so
+the compiler never runs it through the preprocessor. build.sh deletes the file
+outright for android builds instead; this patch supplies the replacement the
+deleted assembly leaves behind.
 
-Drop the assembly on android and let aarch64_get_thread_helper() return
-Thread::current() instead, as termux-packages does in
-0006-aarch64_get_thread_helper-Thread-current and
-0007-Remove-aarch64_get_thread_helper.
-
-11 needs the exclusion done in the makefile: its copy is threadLS_linux_aarch64.s
-with a lowercase extension, so the compiler never preprocesses it and it cannot
-guard itself. The gate is the OPENJDK_TARGET_LIBC test patch 0011 already uses.
-
-CompileGtest.gmk needs the same exclusion spelled out again: it builds its own
-copy of libjvm and hardcodes EXCLUDE_FILES to gtestLauncher.cpp rather than
-inheriting JVM_EXCLUDE_FILES, so the first attempt at this patch fixed the real
-libjvm.so and left the gtest one still assembling the TLSDESC sequence -- which
-is the copy gtestLauncher links against, so the build failed in exactly the
-same place.
-
-diff --git a/make/hotspot/lib/CompileGtest.gmk b/make/hotspot/lib/CompileGtest.gmk
-index f6af4d3..bb37a23 100644
---- a/make/hotspot/lib/CompileGtest.gmk
-+++ b/make/hotspot/lib/CompileGtest.gmk
-@@ -66,7 +66,7 @@ $(eval $(call SetupNativeCompilation, BUILD_GTEST_LIBJVM, \
-     OBJECT_DIR := $(JVM_OUTPUTDIR)/gtest/objs, \
-     SRC := $(GTEST_TEST_SRC), \
-     EXCLUDES := $(JVM_EXCLUDES), \
--    EXCLUDE_FILES := gtestLauncher.cpp, \
-+    EXCLUDE_FILES := gtestLauncher.cpp $(JVM_EXCLUDE_FILES), \
-     EXCLUDE_PATTERNS := $(JVM_EXCLUDE_PATTERNS), \
-     EXTRA_FILES := $(GTEST_FRAMEWORK_SRC)/src/gtest-all.cc, \
-     EXTRA_OBJECT_FILES := $(filter-out %/operator_new$(OBJ_SUFFIX), \
-diff --git a/make/hotspot/lib/CompileJvm.gmk b/make/hotspot/lib/CompileJvm.gmk
-index 48e75e2..8aca7bc 100644
---- a/make/hotspot/lib/CompileJvm.gmk
-+++ b/make/hotspot/lib/CompileJvm.gmk
-@@ -55,6 +55,15 @@ JVM_LIBS += \
- 
- # These files and directories are always excluded
- JVM_EXCLUDE_FILES += args.cc
-+
-+# threadLS_linux_aarch64.s reads Thread::_thr_current through TLSDESC, which
-+# bionic's linker cannot resolve; the header supplies a plain Thread::current()
-+# in its place there. The file is .s rather than .S, so it is never run through
-+# the preprocessor and cannot guard itself. android is the linux target whose
-+# libc configure reports as neither gnu nor musl.
-+ifeq (197121call isTargetOs, linux)-197121if 197121filter gnu musl, 197121OPENJDK_TARGET_LIBC)),known,other), true-other)
-+  JVM_EXCLUDE_FILES += threadLS_linux_aarch64.s
-+endif
- JVM_EXCLUDES += adlc
- 
- # Needed by abstract_vm_version.cpp
 diff --git a/src/hotspot/os_cpu/linux_aarch64/thread_linux_aarch64.hpp b/src/hotspot/os_cpu/linux_aarch64/thread_linux_aarch64.hpp
 index 985b664..ee69e20 100644
 --- a/src/hotspot/os_cpu/linux_aarch64/thread_linux_aarch64.hpp

@@ -369,6 +369,19 @@ if [ "$PLATFORM" = android ]; then
   # patching version-script-clang.txt in each release.
   EXTRA_CONF+=(--with-extra-ldflags="-L$STUB_DIR -Wl,--undefined-version")
 
+  # aarch64: 11 keeps the TLSDESC thread-pointer helper in a lowercase .s, which
+  # the compiler never preprocesses, so unlike 17+ it cannot be guarded with
+  # #ifndef __ANDROID__ from inside. Excluding it through the makefiles did not
+  # take either -- the libjvm object count was unchanged with JVM_EXCLUDE_FILES
+  # set -- so remove the file, which is unambiguous. Patch 0015 supplies the
+  # aarch64_get_thread_helper() the assembly would have defined. Nothing else
+  # references it, and only aarch64 targets ever compile it.
+  TLSDESC_S="$SRC/src/hotspot/os_cpu/linux_aarch64/threadLS_linux_aarch64.s"
+  if [ -f "$TLSDESC_S" ]; then
+    log "Removing $(basename "$TLSDESC_S") (bionic has no TLSDESC support)"
+    rm -f "$TLSDESC_S"
+  fi
+
   # 8: drop the Serviceability Agent's native half. libsaproc talks to
   # libthread_db through <thread_db.h>, which bionic has no equivalent of:
   #   proc_service.h:29:10: fatal error: 'thread_db.h' file not found
