@@ -1,0 +1,29 @@
+hotspot: don't treat warnings as errors
+
+8 has no --disable-warnings-as-errors, which every other release here is
+configured with, so hotspot's own -Werror stops the android builds on warnings
+that are noise for this toolchain:
+
+  c1_LIRAssembler_aarch64.cpp:2335:10: error: template argument uses unnamed
+      type [-Werror,-Wunnamed-type-template-args]
+  threadLS_linux_x86.hpp:35:11: error: 'PAGE_SIZE' macro redefined
+      [-Werror,-Wmacro-redefined]
+
+Neither is a real defect: the first is a C++ pedantry the aarch64 port predates,
+and the second is bionic defining PAGE_SIZE in its headers where glibc does not.
+Empty the variable rather than deleting it -- gcc.make appends a long list of
+-Wno-* to it just below, and adlc.make reads it too.
+
+diff --git a/hotspot/make/linux/makefiles/gcc.make b/hotspot/make/linux/makefiles/gcc.make
+index 70b130b..0f59bd0 100644
+--- a/hotspot/make/linux/makefiles/gcc.make
++++ b/hotspot/make/linux/makefiles/gcc.make
+@@ -202,7 +202,7 @@ else
+ endif
+ 
+ # Compiler warnings are treated as errors
+-WARNINGS_ARE_ERRORS = -Werror
++WARNINGS_ARE_ERRORS =
+ 
+ ifeq ($(USE_CLANG), true)
+   # However we need to clean the code up before we can unrestrictedly enable this option with Clang

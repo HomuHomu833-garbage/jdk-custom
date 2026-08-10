@@ -1,0 +1,56 @@
+os_linux: don't query glibc/pthread versions on android
+
+<gnu/libc-version.h> is a glibc header with no bionic equivalent, so hotspot
+does not compile for android at all:
+
+  os_linux.cpp:98:11: fatal error: 'gnu/libc-version.h' file not found
+
+libpthread_init() then queries _CS_GNU_LIBC_VERSION / _CS_GNU_LIBPTHREAD_VERSION
+and falls back to gnu_get_libc_version(), none of which bionic has. Its pthread
+implementation lives inside libc rather than a separate library, so there is no
+version to report and no LinuxThreads-era flavour to detect: bionic is always
+NPTL-like with floating stacks, which is what the android branch asserts
+directly.
+
+The 11+ releases carry this as patch 0002; this is the same change against 8's
+older os_linux.cpp, which spells the setter set_glibc_version and has to set
+the NPTL and floating-stack flags the skipped code would have set.
+
+diff --git a/hotspot/src/os/linux/vm/os_linux.cpp b/hotspot/src/os/linux/vm/os_linux.cpp
+index 09c4056..e6f719d 100644
+--- a/hotspot/src/os/linux/vm/os_linux.cpp
++++ b/hotspot/src/os/linux/vm/os_linux.cpp
+@@ -95,7 +95,9 @@
+ # include <string.h>
+ # include <syscall.h>
+ # include <sys/sysinfo.h>
++#ifndef __ANDROID__
+ # include <gnu/libc-version.h>
++#endif
+ # include <sys/ipc.h>
+ # include <sys/shm.h>
+ # include <link.h>
+@@ -584,6 +586,15 @@ void os::Linux::hotspot_sigmask(Thread* thread) {
+ // detecting pthread library
+ 
+ void os::Linux::libpthread_init() {
++#ifdef __ANDROID__
++  // bionic defines neither _CS_GNU_LIBC_VERSION nor _CS_GNU_LIBPTHREAD_VERSION,
++  // and its pthread implementation lives inside libc rather than a separate
++  // library, so there is no version to query. It is always NPTL-like.
++  os::Linux::set_glibc_version("bionic - unknown");
++  os::Linux::set_libpthread_version("bionic - unknown");
++  os::Linux::set_is_NPTL();
++  os::Linux::set_is_floating_stack();
++#else
+   // Save glibc and pthread version strings. Note that _CS_GNU_LIBC_VERSION
+   // and _CS_GNU_LIBPTHREAD_VERSION are supported in glibc >= 2.3.2. Use a
+   // generic name for earlier versions.
+@@ -642,6 +653,7 @@ void os::Linux::libpthread_init() {
+   if (os::Linux::is_NPTL() || os::Linux::supports_variable_stack_size()) {
+      os::Linux::set_is_floating_stack();
+   }
++#endif
+ }
+ 
+ /////////////////////////////////////////////////////////////////////////////

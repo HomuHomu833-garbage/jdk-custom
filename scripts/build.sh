@@ -45,7 +45,15 @@ case "$ARCH" in
     # 25 dropped the 32-bit x86 JIT: basic.m4 errors out with "32-bit x86 builds
     # are not supported" unless the variant is zero. Older releases still have it.
     if [ "$JDK_VERSION" -ge 25 ] 2>/dev/null; then JVM_VARIANT=zero; else JVM_VARIANT=server; fi ;;
-  aarch64|aarch64_be|arm|arm64|arm64e|armeb|armhf|armv7a|powerpc64|powerpc64le|ppc64|ppc64le|riscv64|s390x|thumb|thumbeb|x86_64|x86_64h)
+  arm|armeb|armhf|armv7a|thumb|thumbeb)
+    # 8 has no 32-bit ARM HotSpot to build: jdk8u mainline ships cpu ports for
+    # aarch64, ppc, sparc, x86 and zero only — JDK 8's ARM32 JIT lived in
+    # Oracle's separate arm-port forest and never landed here. Left on server it
+    # picks up no arch at all and compiles the VM with the i486 flags
+    # ("unsupported argument 'i586' to option '-march='"). 11+ carry
+    # src/hotspot/cpu/arm, so they keep the JIT.
+    if [ "$JDK_VERSION" = 8 ]; then JVM_VARIANT=zero; else JVM_VARIANT=server; fi ;;
+  aarch64|aarch64_be|arm64|arm64e|powerpc64|powerpc64le|ppc64|ppc64le|riscv64|s390x|x86_64|x86_64h)
     JVM_VARIANT=server ;;
   loongarch64)
     if [ "$JDK_VERSION" -ge 21 ] 2>/dev/null; then JVM_VARIANT=server; else JVM_VARIANT=zero; fi ;;
