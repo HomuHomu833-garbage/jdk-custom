@@ -180,21 +180,41 @@ EXTRA_CONF+=(--build="$BUILD_TRIPLE")
 # (CoreAudio / DirectSound, never ALSA) and the BSDs never needed it, so only
 # TARGET_OS=linux is touched. Edits go into the fetched source tree and are keyed
 # to text that is stable across the supported feature versions.
+#
+# Fetch the pinned miniaudio header once and put it, and the backend, into the
+# platform sound source directory the build compiles from -- 8 and 11+ disagree
+# on where that is, so the caller passes it in.
+install_miniaudio() {
+  local dest="$1" header="$BUILD_DIR/miniaudio-$MINIAUDIO_VERSION/miniaudio.h"
+
+  [ -d "$dest" ] || { echo "libjsound sources not found at $dest" >&2; exit 1; }
+  [ -f "$MINIAUDIO_BACKEND" ] || {
+    echo "miniaudio backend not found at $MINIAUDIO_BACKEND" >&2; exit 1; }
+  if [ ! -f "$header" ]; then
+    log "Downloading miniaudio $MINIAUDIO_VERSION (libjsound PCM backend)"
+    mkdir -p "$(dirname "$header")"
+    aria2c --console-log-level=error --check-certificate=false --max-tries=5 \
+      --dir="$(dirname "$header")" -o miniaudio.h \
+      "https://raw.githubusercontent.com/mackron/miniaudio/$MINIAUDIO_VERSION/miniaudio.h"
+  fi
+  cp "$header" "$dest/miniaudio.h"
+  cp "$MINIAUDIO_BACKEND" "$dest/"
+}
+
 if [ "$TARGET_OS" = linux ]; then
   if [ "$JDK_VERSION" = 8 ]; then
-    # 8 predates the shared libjsound layout the miniaudio backend plugs into,
-    # so it keeps the older treatment: no ALSA, and no native sound provider.
-    # com.sun.media.sound.Platform loads the native lib in a try/catch(Throwable),
-    # so javax.sound reports no devices instead of breaking java.desktop, and the
-    # pure-Java parts (software synth, file readers) are unaffected.
-    log "Dropping the ALSA dependency (no cross sysroot here ships ALSA)"
+    log "Building libjsound against miniaudio instead of libjsoundalsa"
     # 8: ALSA lives in its own libjsoundalsa, pulled in only when the makefile
-    # adds jsoundalsa to EXTRA_SOUND_JNI_LIBS — drop that and the core libjsound
-    # still builds. 8 is also the one version shipping a checked-in
-    # generated-configure.sh, so ALSA_NOT_NEEDED goes into it as well as the .m4.
+    # adds jsoundalsa to EXTRA_SOUND_JNI_LIBS. Rather than keep a second library
+    # alive, fold the miniaudio provider straight into libjsound the way macosx
+    # and solaris already fold in their own platform PCM files — libjsound's
+    # mapfile already exports the DirectAudioDevice natives for exactly that
+    # reason, so no symbol plumbing has to move. 8 is also the one version
+    # shipping a checked-in generated-configure.sh, so ALSA_NOT_NEEDED goes into
+    # it as well as the .m4.
     SND_GMK="$SRC/jdk/make/lib/SoundLibraries.gmk"
     grep -q 'EXTRA_SOUND_JNI_LIBS += jsoundalsa' "$SND_GMK" 2>/dev/null || {
-      echo "unexpected $SND_GMK: no jsoundalsa to drop" >&2; exit 1; }
+      echo "unexpected $SND_GMK: no jsoundalsa to replace" >&2; exit 1; }
     for f in "$SRC/common/autoconf/libraries.m4" "$SRC/common/autoconf/generated-configure.sh"; do
       [ -f "$f" ] || continue
       # The linux block only disables pulse; disable alsa right alongside it. The
@@ -202,7 +222,45 @@ if [ "$TARGET_OS" = linux ]; then
       # matching all of them is harmless.
       sed -i 's/^\([[:space:]]*\)PULSE_NOT_NEEDED=yes$/\1PULSE_NOT_NEEDED=yes\n\1ALSA_NOT_NEEDED=yes/' "$f"
     done
+
+    # 8 keeps every unix platform source under src/solaris, ALSA included.
+    install_miniaudio "$SRC/jdk/src/solaris/native/com/sun/media/sound"
+
+    # Then rewrite the linux block: no jsoundalsa (its whole makefile stanza is
+    # guarded on EXTRA_SOUND_JNI_LIBS, so dropping the entry leaves the ALSA
+    # sources uncompiled), and the DirectAudio provider compiled into libjsound
+    # with the providers miniaudio cannot serve switched off. LIBJSOUND_SRC_FILES
+    # is an explicit list here, so nothing has to be excluded.
     sed -i '/EXTRA_SOUND_JNI_LIBS += jsoundalsa/d' "$SND_GMK"
+    awk '
+      $0 == "  LIBJSOUND_CFLAGS += -DX_PLATFORM=X_LINUX" {
+        print "  LIBJSOUND_CFLAGS += -DX_PLATFORM=X_LINUX \\"
+        print "      -DUSE_DAUDIO=TRUE \\"
+        print "      -DUSE_PORTS=FALSE \\"
+        print "      -DUSE_PLATFORM_MIDI_OUT=FALSE \\"
+        print "      -DUSE_PLATFORM_MIDI_IN=FALSE"
+        print "  LIBJSOUND_SRC_FILES += PLATFORM_API_MiniAudio_PCM.c $(LIBJSOUND_DAUDIOFILES)"
+        done = 1
+        next
+      }
+      { print }
+      END { if (!done) exit 1 }
+    ' "$SND_GMK" > "$SND_GMK.tmp" || {
+      echo "unexpected $SND_GMK: no linux X_PLATFORM line to extend" >&2; exit 1; }
+    mv "$SND_GMK.tmp" "$SND_GMK"
+
+    # miniaudio resolves its backends through the dynamic loader at run time.
+    awk '
+      !done && index($0, "LDFLAGS_SUFFIX_posix := -ljava -ljvm,") {
+        match($0, /^[[:space:]]*/)
+        print substr($0, 1, RLENGTH) "LDFLAGS_SUFFIX_linux := $(LIBDL) -lm -lpthread, \\"
+        done = 1
+      }
+      { print }
+      END { if (!done) exit 1 }
+    ' "$SND_GMK" > "$SND_GMK.tmp" || {
+      echo "unexpected $SND_GMK: no libjsound LDFLAGS_SUFFIX to extend" >&2; exit 1; }
+    mv "$SND_GMK.tmp" "$SND_GMK"
   else
     log "Building libjsound against miniaudio instead of ALSA"
     # 11+: configure regenerates from the .m4 via autoconf (no checked-in
@@ -213,24 +271,9 @@ if [ "$TARGET_OS" = linux ]; then
       echo "unexpected $ALSA_M4: no NEEDS_LIB_ALSA to disable" >&2; exit 1; }
     sed -i 's/NEEDS_LIB_ALSA=true/NEEDS_LIB_ALSA=false/' "$ALSA_M4"
 
-    # Drop the miniaudio backend and its (pinned) single header in next to the
-    # ALSA sources they replace. The header is fetched rather than vendored, the
-    # same way libffi and the NDK are.
+    # 11+ keeps the linux platform sources next to the ALSA ones they replace.
     JSOUND_SRC="$SRC/src/java.desktop/linux/native/libjsound"
-    [ -d "$JSOUND_SRC" ] || {
-      echo "libjsound sources not found at $JSOUND_SRC" >&2; exit 1; }
-    [ -f "$MINIAUDIO_BACKEND" ] || {
-      echo "miniaudio backend not found at $MINIAUDIO_BACKEND" >&2; exit 1; }
-    MINIAUDIO_H="$BUILD_DIR/miniaudio-$MINIAUDIO_VERSION/miniaudio.h"
-    if [ ! -f "$MINIAUDIO_H" ]; then
-      log "Downloading miniaudio $MINIAUDIO_VERSION (libjsound PCM backend)"
-      mkdir -p "$(dirname "$MINIAUDIO_H")"
-      aria2c --console-log-level=error --check-certificate=false --max-tries=5 \
-        --dir="$(dirname "$MINIAUDIO_H")" -o miniaudio.h \
-        "https://raw.githubusercontent.com/mackron/miniaudio/$MINIAUDIO_VERSION/miniaudio.h"
-    fi
-    cp "$MINIAUDIO_H" "$JSOUND_SRC/miniaudio.h"
-    cp "$MINIAUDIO_BACKEND" "$JSOUND_SRC/"
+    install_miniaudio "$JSOUND_SRC"
 
     # Then point the makefile at it. The ALSA sources include <alsa/asoundlib.h>
     # and call snd_* outside the USE_* guards, so they have to leave the build
