@@ -10,15 +10,19 @@
 #   JDK_VERSION     feature version: 8 | 11 | 17 | 21 | 25
 #   ROOTDIR         checkout root (default: cwd)
 #   NDK_VERSION/NDK_REVISION  official NDK for the android clang (android only)
+#   MINIAUDIO_VERSION  miniaudio release used for libjsound (linux targets)
 set -euo pipefail
 
 ROOTDIR="${ROOTDIR:-$PWD}"
 : "${PLATFORM:?set PLATFORM}" "${TARGET:?set TARGET}" "${JDK_VERSION:?set JDK_VERSION}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 SRC="${SRC:-$ROOTDIR/jdk-src}"
 BOOT_JDK="${BOOT_JDK:-$ROOTDIR/boot-jdk}"
 ARCH="${TARGET%%-*}"
 BUILD_DIR="$ROOTDIR/build"
 INSTALL_DIR="$ROOTDIR/install"
+MINIAUDIO_VERSION="${MINIAUDIO_VERSION:-0.11.25}"
+MINIAUDIO_BACKEND="${MINIAUDIO_BACKEND:-$SCRIPT_DIR/../src/libjsound/PLATFORM_API_MiniAudio_PCM.c}"
 cd "$ROOTDIR"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -159,22 +163,31 @@ BUILD_TRIPLE="$(gcc -dumpmachine 2>/dev/null || clang -dumpmachine 2>/dev/null |
 [ -n "$BUILD_TRIPLE" ] || { echo "cannot determine the build triple (no gcc/clang?)" >&2; exit 1; }
 EXTRA_CONF+=(--build="$BUILD_TRIPLE")
 
-# --- drop ALSA --------------------------------------------------------------
+# --- sound: ALSA out, miniaudio in ------------------------------------------
 # OpenJDK demands ALSA for every OPENJDK_TARGET_OS=linux build and links its sound
 # native lib against -lasound, so configure dies with "Could not find alsa!" —
 # none of the cross sysroots here carry ALSA, and bionic has no ALSA at all.
 # Termux works around this by packaging alsa-lib for Android and pointing
-# configure at it; with no equivalent sysroot for any target, sound is dropped
-# from the linux/android builds instead. macOS and Windows keep their native
-# sound (CoreAudio / DirectSound, never ALSA) and the BSDs never needed it, so
-# only TARGET_OS=linux is touched. com.sun.media.sound.Platform loads the native
-# lib in a try/catch(Throwable), so javax.sound reports no devices instead of
-# breaking java.desktop; the pure-Java parts (software synth, file readers) are
-# unaffected. Edits go into the fetched source tree and are keyed to text that is
-# stable across the supported feature versions.
+# configure at it; with no equivalent sysroot for any target, libjsound is built
+# against miniaudio instead (src/libjsound/PLATFORM_API_MiniAudio_PCM.c).
+# miniaudio declares the backend symbols itself and dlopen()s whatever the
+# machine actually has — PulseAudio, ALSA, JACK, sndio, OSS, and AAudio/OpenSL ES
+# on android — so nothing has to be found at build time and one binary covers
+# every target. It replaces the PCM (DirectAudio) provider only: ports (mixer
+# controls) and MIDI have no miniaudio equivalent and are compiled out, so
+# javax.sound.sampled gets playback and capture while javax.sound.midi keeps
+# only its pure-Java software synth. macOS and Windows keep their native sound
+# (CoreAudio / DirectSound, never ALSA) and the BSDs never needed it, so only
+# TARGET_OS=linux is touched. Edits go into the fetched source tree and are keyed
+# to text that is stable across the supported feature versions.
 if [ "$TARGET_OS" = linux ]; then
-  log "Dropping the ALSA dependency (no cross sysroot here ships ALSA)"
   if [ "$JDK_VERSION" = 8 ]; then
+    # 8 predates the shared libjsound layout the miniaudio backend plugs into,
+    # so it keeps the older treatment: no ALSA, and no native sound provider.
+    # com.sun.media.sound.Platform loads the native lib in a try/catch(Throwable),
+    # so javax.sound reports no devices instead of breaking java.desktop, and the
+    # pure-Java parts (software synth, file readers) are unaffected.
+    log "Dropping the ALSA dependency (no cross sysroot here ships ALSA)"
     # 8: ALSA lives in its own libjsoundalsa, pulled in only when the makefile
     # adds jsoundalsa to EXTRA_SOUND_JNI_LIBS — drop that and the core libjsound
     # still builds. 8 is also the one version shipping a checked-in
@@ -191,33 +204,67 @@ if [ "$TARGET_OS" = linux ]; then
     done
     sed -i '/EXTRA_SOUND_JNI_LIBS += jsoundalsa/d' "$SND_GMK"
   else
+    log "Building libjsound against miniaudio instead of ALSA"
     # 11+: configure regenerates from the .m4 via autoconf (no checked-in
-    # generated-configure.sh since 11), so clearing NEEDS_LIB_ALSA is enough.
+    # generated-configure.sh since 11), so clearing NEEDS_LIB_ALSA is all it
+    # takes to stop it hunting for headers no sysroot here has.
     ALSA_M4="$SRC/make/autoconf/libraries.m4"
     grep -qE 'NEEDS_LIB_ALSA=(true|false)' "$ALSA_M4" || {
       echo "unexpected $ALSA_M4: no NEEDS_LIB_ALSA to disable" >&2; exit 1; }
     sed -i 's/NEEDS_LIB_ALSA=true/NEEDS_LIB_ALSA=false/' "$ALSA_M4"
 
-    # Then skip libjsound itself, as AIX already does: its ALSA sources include
-    # <alsa/asoundlib.h> and call snd_* outside the USE_* guards, so the library
-    # cannot be built at all without ALSA headers. 11 keeps the rules in
-    # make/lib/, 17+ in make/modules/; both open the block with the same
-    # `ifeq ($(call isTargetOs, aix), false)` line, matched via the
-    # LIBJSOUND_CFLAGS that follows it so no other ifeq is hit.
+    # Drop the miniaudio backend and its (pinned) single header in next to the
+    # ALSA sources they replace. The header is fetched rather than vendored, the
+    # same way libffi and the NDK are.
+    JSOUND_SRC="$SRC/src/java.desktop/linux/native/libjsound"
+    [ -d "$JSOUND_SRC" ] || {
+      echo "libjsound sources not found at $JSOUND_SRC" >&2; exit 1; }
+    [ -f "$MINIAUDIO_BACKEND" ] || {
+      echo "miniaudio backend not found at $MINIAUDIO_BACKEND" >&2; exit 1; }
+    MINIAUDIO_H="$BUILD_DIR/miniaudio-$MINIAUDIO_VERSION/miniaudio.h"
+    if [ ! -f "$MINIAUDIO_H" ]; then
+      log "Downloading miniaudio $MINIAUDIO_VERSION (libjsound PCM backend)"
+      mkdir -p "$(dirname "$MINIAUDIO_H")"
+      aria2c --console-log-level=error --check-certificate=false --max-tries=5 \
+        --dir="$(dirname "$MINIAUDIO_H")" -o miniaudio.h \
+        "https://raw.githubusercontent.com/mackron/miniaudio/$MINIAUDIO_VERSION/miniaudio.h"
+    fi
+    cp "$MINIAUDIO_H" "$JSOUND_SRC/miniaudio.h"
+    cp "$MINIAUDIO_BACKEND" "$JSOUND_SRC/"
+
+    # Then point the makefile at it. The ALSA sources include <alsa/asoundlib.h>
+    # and call snd_* outside the USE_* guards, so they have to leave the build
+    # entirely; the providers miniaudio cannot serve are compiled out through the
+    # USE_* flags the sources already honour; and -lasound gives way to the
+    # dynamic loader miniaudio needs ($(ALSA_LIBS) is empty by now anyway).
+    # 11 keeps the rules in make/lib/, 17+ in make/modules/.
     JSOUND_GMK="$SRC/make/modules/java.desktop/Lib.gmk"
     [ -f "$JSOUND_GMK" ] || JSOUND_GMK="$SRC/make/lib/Lib-java.desktop.gmk"
     [ -f "$JSOUND_GMK" ] || { echo "libjsound makefile not found under $SRC/make" >&2; exit 1; }
-    if ! grep -q 'drop-alsa' "$JSOUND_GMK"; then
-      awk '
-        { line[NR] = $0 }
-        /^ifeq \(\$\(call isTargetOs, aix\), false\)$/ { guard = NR }
-        /LIBJSOUND_CFLAGS/ && guard && !target { target = guard }
-        END {
-          if (!target) exit 1
-          for (i = 1; i <= NR; i++) print (i == target ? "ifeq (drop-alsa, keep-alsa)" : line[i])
+    if ! grep -q 'EXCLUDE_FILES := PLATFORM_API_LinuxOS_ALSA' "$JSOUND_GMK"; then
+      grep -q 'LIBS_linux := $(ALSA_LIBS)' "$JSOUND_GMK" || {
+        echo "unexpected $JSOUND_GMK: no ALSA_LIBS to replace" >&2; exit 1; }
+      sed -i \
+        -e 's/-DUSE_PORTS=TRUE/-DUSE_PORTS=FALSE/' \
+        -e 's/-DUSE_PLATFORM_MIDI_OUT=TRUE/-DUSE_PLATFORM_MIDI_OUT=FALSE/' \
+        -e 's/-DUSE_PLATFORM_MIDI_IN=TRUE/-DUSE_PLATFORM_MIDI_IN=FALSE/' \
+        -e 's|LIBS_linux := [$](ALSA_LIBS),|LIBS_linux := $(LIBDL) -lm -lpthread,|' \
+        "$JSOUND_GMK"
+      # EXCLUDE_FILES matches on basename, so the list needs no paths.
+      ALSA_SRC="$(cd "$JSOUND_SRC" && echo PLATFORM_API_LinuxOS_ALSA_*.c)"
+      case "$ALSA_SRC" in
+        *'*'*) echo "unexpected $JSOUND_SRC: no ALSA sources to exclude" >&2; exit 1 ;;
+      esac
+      awk -v excl="$ALSA_SRC" '
+        { print }
+        !done && index($0, "NAME := jsound, \\") {
+          match($0, /^[[:space:]]*/)
+          print substr($0, 1, RLENGTH) "EXCLUDE_FILES := " excl ", \\"
+          done = 1
         }
+        END { if (!done) exit 1 }
       ' "$JSOUND_GMK" > "$JSOUND_GMK.tmp" || {
-        echo "unexpected $JSOUND_GMK: libjsound guard not found" >&2; exit 1; }
+        echo "unexpected $JSOUND_GMK: no libjsound NAME to anchor to" >&2; exit 1; }
       mv "$JSOUND_GMK.tmp" "$JSOUND_GMK"
     fi
   fi
