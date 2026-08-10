@@ -71,7 +71,11 @@ case "$PLATFORM" in
     export CC="$TC/bin/cc" CXX="$TC/bin/c++"
     EXTRA_CONF+=(AR="$TC/bin/ar" NM="$TC/bin/nm" STRIP="$TC/bin/strip" OBJCOPY="$TC/bin/objcopy" OBJDUMP="$TC/bin/objdump")
     TARGET_OS=linux
-    # musl links the JDK launchers fully static-libc; glibc keeps libc dynamic.
+    # musl: fold libgcc into the binaries so nothing external is needed for it.
+    # Deliberately not a static libc: the JDK reaches for dlopen all over the
+    # place (JNI/System.loadLibrary, fontconfig, cups, the miniaudio backends),
+    # and dlopen in a statically linked musl binary always fails. glibc keeps
+    # both dynamic.
     case "$TARGET" in
       *musl*) EXTRA_CONF+=(--with-extra-ldflags=-static-libgcc) ;;
     esac
@@ -99,6 +103,13 @@ case "$PLATFORM" in
     EXTRA_CONF+=(AR="$TC/bin/${TARGET}-ar" NM="$TC/bin/${TARGET}-nm" STRIP="$TC/bin/${TARGET}-strip" OBJCOPY="$TC/bin/${TARGET}-objcopy" OBJDUMP="$TC/bin/${TARGET}-objdump")
     export RC="$TC/bin/${TARGET}-windres"
     TARGET_OS=windows
+    # Fold llvm-mingw's own runtime -- libunwind, libc++, libwinpthread -- into
+    # each binary, so the JDK does not need those DLLs shipped beside it. This is
+    # as static as Windows gets: the CRT itself (msvcrt/ucrtbase) is an OS
+    # component, and there is no static archive of it to link. dlopen has no
+    # equivalent problem here — LoadLibrary is a system call, not a libc feature,
+    # so JNI and the rest keep working.
+    EXTRA_CONF+=(--with-extra-ldflags=-static)
     ;;
   macos)
     # macOS via osxcross (cctools-port + clang wrappers carrying the SDK sysroot);
