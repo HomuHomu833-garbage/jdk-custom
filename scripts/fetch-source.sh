@@ -71,7 +71,8 @@ import json
 d = json.load(open("/tmp/azul-feed.json"))
 v = d["jdk_version"]
 if v[0] == 8:
-    print(f"jdk8u{v[2]}-b{v[3]}")
+    # 8u pads the build number to two digits: jdk8u502-b07, not -b7.
+    print(f"jdk8u{v[2]}-b{v[3]:02d}")
 else:
     print(f"jdk-{v[0]}.{v[1]}.{v[2]}+{v[3]}")
 ' < /dev/null)"
