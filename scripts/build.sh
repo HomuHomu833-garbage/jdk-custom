@@ -108,8 +108,26 @@ case "$PLATFORM" in
     esac
     ;;
   windows)
-    # Windows via llvm-mingw. Note: upstream OpenJDK officially targets MSVC; the
-    # mingw path is experimental and leans on the patches/global/jdk fixups.
+    # Windows via llvm-mingw. This does NOT work, and not for want of a patch or
+    # two: OpenJDK has no linux-to-windows cross mode at all. Three separate
+    # walls, verified against 8 through 25:
+    #
+    #   1. configure only recognises a windows *build host*. basic_windows.m4
+    #      branches on OPENJDK_BUILD_OS_ENV being windows.cygwin / windows.msys2
+    #      / windows.wsl1 / windows.wsl2, so from linux it goes looking for
+    #      cygpath or wslpath and stops:
+    #        configure: error: Incorrect linux installation. Neither cygpath nor
+    #        wslpath was found
+    #   2. every release declares VALID_TOOLCHAINS_windows="microsoft", so
+    #      --with-toolchain-type=clang is refused even past that point.
+    #   3. the windows halves of NativeCompilation.gmk and the flags m4s are
+    #      written around MSVC conventions -- .obj, link.exe, LIB, MT, RC,
+    #      manifests -- which mingw does not share.
+    #
+    # Getting windows JDKs out of this repository means building them on a
+    # windows runner with MSVC, which is a separate path from everything here,
+    # not a fixup on top of it. The toolchain wiring below is left in place so
+    # that work has somewhere to start.
     TC=/opt/llvm-mingw
     export CC="$TC/bin/${TARGET}-clang" CXX="$TC/bin/${TARGET}-clang++"
     EXTRA_CONF+=(AR="$TC/bin/${TARGET}-ar" NM="$TC/bin/${TARGET}-nm" STRIP="$TC/bin/${TARGET}-strip" OBJCOPY="$TC/bin/${TARGET}-objcopy" OBJDUMP="$TC/bin/${TARGET}-objdump")
