@@ -272,6 +272,23 @@ case "$PLATFORM" in
     #   'void *' with an rvalue of type 'FARPROC'
     # Cast it, the way the same file already does elsewhere for GetProcAddress
     # results.
+    # All of hotspot compiles now; the export machinery is next. CompileJvm.gmk
+    # builds a .def listing the C++ vftable symbols to export from jvm.dll by
+    # running MSVC's dumpbin over the object files, and passes it as -def:. The
+    # tool is not here, and the flag is link.exe syntax:
+    #   [.../win-exports.def] Error 127
+    # Both are guarded by "target is windows" rather than "toolchain is
+    # microsoft", the same as everything else in this port. mingw exports the
+    # JNIEXPORT entry points from their __declspec(dllexport) anyway; what the
+    # .def adds beyond that is vftable symbols for debugging tools, which a
+    # first working build can do without.
+    CJ="$SRC/make/hotspot/lib/CompileJvm.gmk"
+    if [ -f "$CJ" ] && grep -q 'JVM_LDFLAGS += -def:\$(WIN_EXPORT_FILE)' "$CJ"; then
+      perl -0pi -e 's/^  JVM_LDFLAGS \+= -def:\$\(WIN_EXPORT_FILE\)$/  ifeq (\$(TOOLCHAIN_TYPE), microsoft)\n    JVM_LDFLAGS += -def:\$(WIN_EXPORT_FILE)\n  endif/m' "$CJ"
+      perl -0pi -e 's/^  \$\(BUILD_LIBJVM_TARGET\): \$\(WIN_EXPORT_FILE\)$/  ifeq (\$(TOOLCHAIN_TYPE), microsoft)\n    \$(BUILD_LIBJVM_TARGET): \$(WIN_EXPORT_FILE)\n  endif/m' "$CJ"
+      log "Skipping the dumpbin-generated jvm.dll export file"
+    fi
+
     OSW="$SRC/src/hotspot/os/windows/os_windows.cpp"
     if [ -f "$OSW" ] && grep -q '::GetProcAddress' "$OSW"; then
       perl -pi -e 's/^  return ::GetProcAddress\(nullptr, name\);$/  return reinterpret_cast<void*>(::GetProcAddress(nullptr, name));/' "$OSW"
