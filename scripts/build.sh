@@ -624,19 +624,72 @@ EOF
     # identifier as a string resource name; llvm-rc does not:
     #   llvm-rc: Error parsing file: expected int or string, got
     #   cjaccessinspectorMenus
-    # Quote it, which is what MSVC decided it meant. Only names that really are
-    # undefined get quoted -- quoting a macro would turn an integer id into a
-    # string one and stop the dialog finding its menu.
+    # Quote it, which is what MSVC decided it meant -- but only where the name
+    # is being defined ("<name> MENU"), not where the dialog refers to it
+    # ("MENU <name>"). The two positions take different things: llvm-rc wants
+    # an int or string for the name of a resource and an int or identifier for
+    # the reference to one, so quoting both trades one parse error for the
+    # other. Only names that really are undefined are touched -- quoting a
+    # macro would turn an integer id into a string one.
     for rc in "$SRC"/src/jdk.accessibility/windows/native/*/*.rc; do
       [ -f "$rc" ] || continue
-      for tok in $(sed -nE 's/^MENU ([A-Za-z_][A-Za-z0-9_]*)$/\1/p' "$rc" | sort -u); do
+      for tok in $(sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*) MENU$/\1/p' "$rc" | sort -u); do
         if grep -rqE "^#define[[:space:]]+$tok\b" "$SRC/src/jdk.accessibility"; then
           continue
         fi
-        sed -i -E "s/^MENU $tok\$/MENU \"$tok\"/; s/^$tok MENU\$/\"$tok\" MENU/" "$rc"
+        sed -i -E "s/^$tok MENU\$/\"$tok\" MENU/" "$rc"
         log "Quoting the undefined resource name $tok in $(basename "$rc")"
       done
     done
+
+    # A library with C++ sources has to be linked by the C++ driver, or the
+    # runtime it needs is simply absent:
+    #   ld.lld: error: undefined symbol: operator delete(void*)
+    #   ld.lld: error: undefined symbol: std::nothrow
+    # SetupNativeCompilation takes that as LINK_TYPE := C++, and sspi_bridge --
+    # one C++ file -- does not say it. Nothing upstream noticed, because the
+    # windows-only C++ libraries have only ever been linked by MSVC, where
+    # link.exe serves both languages and the CRT carries operator new either
+    # way. Rather than name each library as it turns up, infer it: the source
+    # list is known one step later, so decide there, and only when the caller
+    # neither asked for a LINK_TYPE nor named its own linker.
+    NCG="$SRC/make/common/NativeCompilation.gmk"
+    if [ -f "$NCG" ] && ! grep -q 'INFERRED_LINK_TYPE' "$NCG"; then
+      awk '
+        { print }
+        !done && $0 == "  $$(eval $$(call SetupSourceFiles,$1))" {
+          print ""
+          print "  # INFERRED_LINK_TYPE: link with the C++ driver when the sources are C++."
+          print "  ifeq ($$($1_LINK_TYPE)$$($1_LD_PROVIDED), )"
+          print "    ifneq ($$(filter %.cpp %.cc %.cxx %.C, $$($1_SRCS)), )"
+          print "      $1_LINK_TYPE := C++"
+          print "      $1_LD := $$(if $$(filter BUILD, $$($1_TARGET_TYPE)), $$(BUILD_LDCXX), $$(LDCXX))"
+          print "    endif"
+          print "  endif"
+          done = 1
+        }
+      ' "$NCG" > "$NCG.tmp" && mv "$NCG.tmp" "$NCG"
+      grep -q 'INFERRED_LINK_TYPE' "$NCG" || {
+        echo "failed to add the C++ link-type inference to NativeCompilation.gmk" >&2; exit 1; }
+      # SetupToolchain runs before the sources are known and fills in $1_LD with
+      # SetIfEmpty, so by the time the block above runs there is no way left to
+      # tell "caller passed LD" from "we defaulted it". Record it beforehand.
+      perl -0pi -e 's/(  # Setup the toolchain to be used\n)/  \$\$(eval \$1_LD_PROVIDED := \$\$(\$1_LD))\n$1/' "$NCG"
+      grep -q 'LD_PROVIDED :=' "$NCG" || {
+        echo "failed to record the caller-provided LD in NativeCompilation.gmk" >&2; exit 1; }
+      log "Linking libraries with C++ sources using the C++ driver"
+    fi
+
+    # mlib_sys.c picks its aligned allocator with #if defined(_MSC_VER), and
+    # everything else gets the unix branch:
+    #   mlib_sys.c:85: error: call to undeclared function 'memalign'
+    # mingw has no memalign; its malloc has the same 8-byte guarantee the MSVC
+    # branch is there to document, so widen the test to the platform.
+    MLB="$SRC/src/java.desktop/share/native/common/awt/medialib/mlib_sys.c"
+    if [ -f "$MLB" ] && grep -q '^#if defined(_MSC_VER) || defined(AIX)$' "$MLB"; then
+      sed -i 's/^#if defined(_MSC_VER) || defined(AIX)$/#if defined(_MSC_VER) || defined(_WIN32) || defined(AIX)/' "$MLB"
+      log "Using malloc rather than memalign in mlib_sys.c on windows"
+    fi
 
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
