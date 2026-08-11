@@ -272,6 +272,32 @@ case "$PLATFORM" in
     #   'void *' with an rvalue of type 'FARPROC'
     # Cast it, the way the same file already does elsewhere for GetProcAddress
     # results.
+    # Windows libraries are listed MSVC-style throughout the build --
+    # LIBS_windows := kernel32.lib user32.lib ws2_32.lib ... -- and clang for
+    # mingw reads a bare foo.lib as a filename rather than a library to search
+    # for:
+    #   clang: error: no such file or directory: 'powrprof.lib'
+    # Translating them at each definition would mean touching hotspot and every
+    # java.* library makefile, so do it once where the link is set up. Upstream
+    # already has the notion of LIBS_<toolchain>; the JDK simply spells these
+    # per-OS instead.
+    LNK="$SRC/make/common/native/Link.gmk"
+    if [ -f "$LNK" ] && grep -q '_STRIPFLAGS ?= $(STRIPFLAGS)' "$LNK"; then
+      awk '
+        { print }
+        !done && index($0, "_STRIPFLAGS ?= $(STRIPFLAGS)") {
+          print ""
+          print "  # mingw wants -lfoo where MSVC wants foo.lib."
+          print "  ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
+          print "    $1_LIBS := $$(patsubst %.lib,-l%,$$($1_LIBS))"
+          print "    $1_EXTRA_LIBS := $$(patsubst %.lib,-l%,$$($1_EXTRA_LIBS))"
+          print "  endif"
+          done = 1
+        }
+      ' "$LNK" > "$LNK.tmp" && mv "$LNK.tmp" "$LNK"
+      log "Translating foo.lib into -lfoo for the mingw linker"
+    fi
+
     # All of hotspot compiles now; the export machinery is next. CompileJvm.gmk
     # builds a .def listing the C++ vftable symbols to export from jvm.dll by
     # running MSVC's dumpbin over the object files, and passes it as -def:. The
