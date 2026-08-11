@@ -717,6 +717,32 @@ EOF
       log "Using malloc rather than memalign in mlib_sys.c on windows"
     fi
 
+    # libsunmscapi passes WCHAR* straight to JNI's jchar* and back:
+    #   security.cpp:660: error: cannot initialize a parameter of type
+    #   'const jchar *' (aka 'const unsigned short *') with an lvalue of type
+    #   'wchar_t *'
+    # It compiles under MSVC because the JDK builds windows C++ with
+    # -Zc:wchar_t-, making wchar_t a typedef for unsigned short rather than a
+    # type of its own -- jabswitch's CXXFLAGS_FILTER_OUT for that very flag is
+    # what shows it is set globally. clang spells the same thing -fno-wchar.
+    # Applied to this one library rather than the whole build: it changes C++
+    # name mangling for anything it touches, and llvm-mingw's libc++ was built
+    # with the ordinary wchar_t. libsunmscapi uses no wide std facilities, so
+    # nothing it links against can notice.
+    MSC="$SRC/make/modules/jdk.crypto.mscapi/Lib.gmk"
+    if [ -f "$MSC" ] && ! grep -q 'fno-wchar' "$MSC"; then
+      awk '
+        { print }
+        !done && index($0, "NAME := sunmscapi,") {
+          print "      CXXFLAGS := -fno-wchar, \\"
+          done = 1
+        }
+      ' "$MSC" > "$MSC.tmp" && mv "$MSC.tmp" "$MSC"
+      grep -q 'fno-wchar' "$MSC" || {
+        echo "failed to add -fno-wchar to the sunmscapi library" >&2; exit 1; }
+      log "Building libsunmscapi with wchar_t as unsigned short, as MSVC does"
+    fi
+
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
     #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
