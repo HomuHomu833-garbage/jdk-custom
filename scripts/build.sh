@@ -329,7 +329,19 @@ case "$PLATFORM" in
     # find the UTC offset. flags-cflags.m4 sets it for the whole gcc/clang
     # toolchain family without asking what the target is. Set it only where it
     # means something.
+    # The gcc/clang branch hands out ELF linker flags whatever the target is:
+    #   lld: error: unknown argument: -soname=jvm.dll
+    # PE has no soname, no $ORIGIN and no version scripts. The microsoft branch
+    # a few lines below clears exactly these three for exactly this reason, so
+    # do the same when clang is aimed at windows. SHARED_LIBRARY_FLAGS stays
+    # -shared, which is right for the clang driver producing a DLL.
     FCF="$SRC/make/autoconf/flags-cflags.m4"
+    if [ -f "$FCF" ] && grep -q 'SET_SHARED_LIBRARY_NAME=.-Wl,-soname=' "$FCF"; then
+      perl -0pi -e 's/(        SET_SHARED_LIBRARY_ORIGIN="-Wl,-z,origin \$SET_EXECUTABLE_ORIGIN"\n      fi\n)/$1\n      if test "x\$OPENJDK_TARGET_OS" = xwindows; then\n        # PE has none of these concepts\n        SET_EXECUTABLE_ORIGIN=\x27\x27\n        SET_SHARED_LIBRARY_ORIGIN=\x27\x27\n        SET_SHARED_LIBRARY_NAME=\x27\x27\n      fi\n/s' "$FCF"
+      grep -q 'PE has none of these concepts' "$FCF" &&
+        log "Clearing the ELF-only linker flags for a windows target"
+    fi
+
     if [ -f "$FCF" ] && grep -q '^    ALWAYS_DEFINES_JVM="-D_GNU_SOURCE"$' "$FCF"; then
       perl -0pi -e 's/^    ALWAYS_DEFINES_JVM="-D_GNU_SOURCE"$/    if test "x\$OPENJDK_TARGET_OS" = xwindows; then\n      ALWAYS_DEFINES_JVM=""\n    else\n      ALWAYS_DEFINES_JVM="-D_GNU_SOURCE"\n    fi/m' "$FCF"
       log "Not defining _GNU_SOURCE for a windows target"
