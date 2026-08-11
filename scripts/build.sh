@@ -198,6 +198,22 @@ case "$PLATFORM" in
       grep -q 'nofixpath' "$MB" &&
         log "Using identity FixPath (no fixpath helper in a cross build)"
     fi
+
+    # GenerateLinkOptData.gmk depends on the *build* JDK's launcher but spells
+    # it with the *target* executable suffix:
+    #   $(CLASSLIST_FILE): $(INTERIM_IMAGE_DIR)/bin/java$(EXECUTABLE_SUFFIX)
+    # With --with-build-jdk pointing at the linux JDK that runs here, that asks
+    # for a java.exe which does not and should not exist:
+    #   No rule to make target '/work/boot-jdk/bin/java.exe'
+    # The recipe below it already invokes .../bin/java unsuffixed, so the
+    # dependency is simply the odd one out. Drop the suffix from both
+    # dependency lines. Safe here because this repository only ever cross-builds
+    # windows from linux; a windows-hosted build would still want the .exe.
+    GLOD="$SRC/make/GenerateLinkOptData.gmk"
+    if [ -f "$GLOD" ] && grep -q 'bin/java\$(EXECUTABLE_SUFFIX)' "$GLOD"; then
+      perl -pi -e 's/\/bin\/java\$\(EXECUTABLE_SUFFIX\)/\/bin\/java/g' "$GLOD"
+      log "Depending on the build JDK's launcher without a .exe suffix"
+    fi
     # Fold llvm-mingw's own runtime -- libunwind, libc++, libwinpthread -- into
     # each binary, so the JDK does not need those DLLs shipped beside it. This is
     # as static as Windows gets: the CRT itself (msvcrt/ucrtbase) is an OS
