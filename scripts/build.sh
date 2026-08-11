@@ -285,6 +285,22 @@ case "$PLATFORM" in
       log "Giving mingw the linux g_isnan definitions"
     fi
 
+    # jni.h reaches jvm_md.h, which includes <windows.h>, which defines
+    # "interface" as a macro for struct. hotspot uses it as an ordinary
+    # identifier -- opto/type.hpp declares a bool parameter called interface --
+    # so the declaration turns into "bool struct" and every call to it then has
+    # one argument too many:
+    #   type.hpp:958: error: declaration of anonymous struct must be a definition
+    #   type.hpp:1332: error: too many arguments to function call, expected 4, have 5
+    # MSVC's windows.h defers that definition to the COM headers, which hotspot
+    # never pulls in; mingw's defines it up front. Undefine it, and "small"
+    # alongside, immediately after the jni.h include that brings them in.
+    # Neither is used as a macro anywhere in hotspot.
+    if [ -f "$GD" ] && ! grep -q '^#undef interface$' "$GD"; then
+      perl -0pi -e 's/^#include "jni\.h"$/#include "jni.h"\n\n#ifdef __MINGW32__\n\/\/ <windows.h>, reached through jni.h, defines these as macros; hotspot uses\n\/\/ them as identifiers.\n#undef interface\n#undef small\n#endif/m' "$GD"
+      log "Undefining the windows.h identifier macros (interface, small)"
+    fi
+
     # hotspot poisons sprintf/vsprintf/vsnprintf by redeclaring them extern "C".
     # mingw's stdio.h declares its own ANSI-stdio versions with C++ linkage, so
     # the two collide before anything else can compile:
