@@ -447,18 +447,24 @@ EOF
       log "Including <errno.h> in WinNTFileSystem_md.c"
     fi
 
-    # java_props_md.c asks SHGetKnownFolderPath for FOLDERID_Profile:
+    # java_props_md.c asks SHGetKnownFolderPath for FOLDERID_Profile, which
+    # mingw's knownfolders.h at most declares:
     #   ld.lld: error: undefined symbol: FOLDERID_Profile
-    # DEFINE_GUID in the SDK headers only declares the GUID; something has to
-    # define it. MSVC picks the definition up from uuid.lib, which it links by
-    # default. mingw's guiddef.h follows the documented alternative: include
-    # <initguid.h> first and DEFINE_GUID emits a (selectany) definition in this
-    # translation unit instead. That is self-contained, so it does not depend on
-    # which GUIDs a given mingw-w64 libuuid.a happens to carry.
+    # MSVC finds the definition in uuid.lib, which it links by default. Pulling
+    # <initguid.h> in first -- the documented way to make DEFINE_GUID emit
+    # definitions -- did not work here: it left the identifier undeclared
+    # entirely, so knownfolders.h evidently keys off something other than the
+    # INITGUID that header sets. Define the one GUID this file needs outright.
+    # A plain definition satisfies both shapes: it stands alone if nothing
+    # declared the name, and completes the tentative definition if something
+    # did. The value is FOLDERID_Profile as knownfolders.h spells it.
     JPM="$SRC/src/java.base/windows/native/libjava/java_props_md.c"
-    if [ -f "$JPM" ] && ! grep -q 'initguid\.h' "$JPM"; then
-      perl -0pi -e 's/^#include /#include <initguid.h>\n#include /m' "$JPM"
-      log "Defining the known-folder GUIDs in java_props_md.c via <initguid.h>"
+    if [ -f "$JPM" ] && grep -q 'FOLDERID_Profile' "$JPM" \
+       && ! grep -q 'FOLDERID_Profile =' "$JPM"; then
+      perl -0pi -e 's/^#include "java_props\.h"$/#include "java_props.h"\n\nconst GUID FOLDERID_Profile =\n    {0x5e6c858f, 0x0e22, 0x4760, {0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73}};/m' "$JPM"
+      grep -q 'FOLDERID_Profile =' "$JPM" || {
+        echo "failed to define FOLDERID_Profile in java_props_md.c" >&2; exit 1; }
+      log "Defining FOLDERID_Profile in java_props_md.c"
     fi
 
     OSW="$SRC/src/hotspot/os/windows/os_windows.cpp"
