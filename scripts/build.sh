@@ -283,6 +283,32 @@ EOF
           log "Providing an arm64intr.h shim (mingw-w64 ships none)"
           ;;
       esac
+
+      # windows.h's min() and max() macros: mingw defines them for C only --
+      # minwindef.h guards them with #ifndef __cplusplus -- where MSVC defines
+      # them for C++ as well. So every .c file is fine and the C++ ones are not:
+      #   D3DVertexCacher.cpp:332: error: use of undeclared identifier 'max';
+      #   did you mean 'fmax'?
+      # Shadow minwindef.h, chain to the real one, and add the missing half.
+      # Going through the header rather than the command line keeps this to the
+      # translation units that actually include windows.h, which is what MSVC
+      # does, and respects NOMINMAX -- so hotspot, which sets it deliberately so
+      # the macros cannot shadow std::min/std::max, still gets neither.
+      if [ -e "$MINGW_INC/minwindef.h" ]; then
+        cat > "$CASE_INC/minwindef.h" <<'EOF'
+#include_next <minwindef.h>
+
+#if defined(__cplusplus) && !defined(NOMINMAX)
+#ifndef max
+#define max(a, b) (((a) > (b)) ? (a) : (b))
+#endif
+#ifndef min
+#define min(a, b) (((a) < (b)) ? (a) : (b))
+#endif
+#endif
+EOF
+        log "Extending minwindef.h with the C++ min/max macros MSVC defines"
+      fi
       # WIN32_LEAN_AND_MEAN keeps windows.h from pulling in rpc.h, objbase.h and
       # ole2.h, which are what define "interface" as a macro for struct. hotspot
       # uses that as an ordinary identifier -- opto/type.hpp has a bool
@@ -462,6 +488,32 @@ EOF
         done
         log "Dropped MSVC-only compiler flags from $(printf '%s\n' "$msvc_files" | wc -l) makefiles"
       fi
+    fi
+
+    # The version-info resource compiles fine -- llvm-mingw's rc handles the
+    # .rc and the -Fo spelling -- but the step after it does not. RC cannot
+    # report its own includes, so the build re-runs the resource through the C
+    # compiler purely to harvest a dependency list, in MSVC's dialect and
+    # without asking which toolchain is in use:
+    #   $1_CC ... -showIncludes -nologo -TC -Fo... -P -Fi...
+    #   clang: error: unknown argument: '-showIncludes'
+    # There is no clang equivalent worth reconstructing here: the .d file it
+    # produces only makes an incremental rebuild notice an edited .rc header,
+    # and every build in this repository starts from a fresh tree. Drop the
+    # scan; both files it feeds are pulled in with -include, so their absence
+    # is already a supported state.
+    CFG="$SRC/make/common/native/CompileFile.gmk"
+    if [ -f "$CFG" ] && grep -q 'Windows RC compiler does not support' "$CFG"; then
+      awk '
+        /# Windows RC compiler does not support -showIncludes/ { drop = 1 }
+        drop && /> \$\$\(\$1_RES_DEPS_TARGETS_FILE\)/ { drop = 0; next }
+        drop { next }
+        { print }
+      ' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+      if grep -q -- '-Fi\$\$(\$1_RES_DEPS_FILE)' "$CFG"; then
+        echo "resource dependency scan still present in CompileFile.gmk" >&2; exit 1
+      fi
+      log "Dropping the CL-based dependency scan for windows resource files"
     fi
 
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
