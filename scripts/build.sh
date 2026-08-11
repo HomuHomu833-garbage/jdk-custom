@@ -237,8 +237,15 @@ case "$PLATFORM" in
             ln -sf "$MINGW_INC/$low" "$CASE_INC/$hdr"
           done
       log "Aliased $(ls -1 "$CASE_INC" | wc -l) capitalised windows headers"
-      EXTRA_CONF+=(--with-extra-cflags="-I$CASE_INC"
-                   --with-extra-cxxflags="-I$CASE_INC")
+      # WIN32_LEAN_AND_MEAN keeps windows.h from pulling in rpc.h, objbase.h and
+      # ole2.h, which are what define "interface" as a macro for struct. hotspot
+      # uses that as an ordinary identifier -- opto/type.hpp has a bool
+      # parameter called interface -- and undefining it once is not enough,
+      # because a later windows.h in the same translation unit brings it back.
+      # MSVC gets away with the same include chain because its windows.h leaves
+      # that definition to the COM headers hotspot never asks for.
+      EXTRA_CONF+=(--with-extra-cflags="-I$CASE_INC -DWIN32_LEAN_AND_MEAN"
+                   --with-extra-cxxflags="-I$CASE_INC -DWIN32_LEAN_AND_MEAN")
     fi
 
     # The target was being classified as a unix one, so the build pulled in
