@@ -734,7 +734,7 @@ EOF
       awk '
         { print }
         !done && index($0, "NAME := sunmscapi,") {
-          print "      CXXFLAGS := -fno-wchar, \\"
+          print "      CXXFLAGS := -Xclang -fno-wchar, \\"
           done = 1
         }
       ' "$MSC" > "$MSC.tmp" && mv "$MSC.tmp" "$MSC"
