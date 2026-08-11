@@ -329,7 +329,13 @@ EOF
       # gone so they cannot shadow std::min/std::max, while the JDK libraries
       # still use min() as a macro (ProcessImpl_md.c does). It is applied to the
       # JVM only, further down.
-      WIN_DEFS="-DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0602"
+      # WIN32 and IAL come from ALWAYS_DEFINES_JDK, which sits in the microsoft
+      # branch beside the two above. Shared code tests WIN32 to pick the windows
+      # half of a #ifdef, so without it a windows build compiles the unix one:
+      #   NativeFunc.h:37: fatal error: 'dlfcn.h' file not found
+      # (hotspot gets -DWIN32 separately, from CFLAGS_OS_DEF_JVM, which is keyed
+      # on the OS and so already reaches us; repeating it here is harmless.)
+      WIN_DEFS="-DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0602 -DWIN32 -DIAL"
       # -Wno-nonportable-include-path: the aliases above are exactly what that
       # warning is for -- <Windows.h> resolving to a file named windows.h -- so
       # it fires on every capitalised include in the tree, hundreds of times,
@@ -514,6 +520,37 @@ EOF
         echo "resource dependency scan still present in CompileFile.gmk" >&2; exit 1
       fi
       log "Dropping the CL-based dependency scan for windows resource files"
+    fi
+
+    # libawt's alloc.h declares its own std::bad_alloc rather than including
+    # <new>, to keep awt.dll from depending on msvcp50.dll -- a saving the
+    # comment there puts at 500kb, and a concern that has not applied to any
+    # toolchain in twenty years. It does apply here, as a hard error:
+    #   alloc.h:35: error: redefinition of 'bad_alloc'
+    # because mingw's C++ headers have already defined the real one by this
+    # point. Include <new> and let the class come from where it belongs.
+    ALC="$SRC/src/java.desktop/windows/native/libawt/windows/alloc.h"
+    if [ -f "$ALC" ] && grep -q 'class bad_alloc {};' "$ALC"; then
+      perl -0pi -e 's/namespace std \{\n    class bad_alloc \{\};\n\}/#include <new>/' "$ALC"
+      if grep -q 'class bad_alloc {};' "$ALC"; then
+        echo "failed to replace the local std::bad_alloc in alloc.h" >&2; exit 1
+      fi
+      log "Taking std::bad_alloc from <new> in libawt's alloc.h"
+    fi
+
+    # ToUnicodeEx writes UTF-16 code units into a WORD[2] and is declared to
+    # take LPWSTR. Both are 16-bit unsigned on windows, and C++ still refuses
+    # the conversion:
+    #   awt_Component.cpp:3596: error: cannot initialize a parameter of type
+    #   'LPWSTR' (aka 'wchar_t *') with an lvalue of type 'WORD[2]'
+    # MSVC accepts it because the JDK builds with wchar_t as a typedef for
+    # unsigned short rather than a distinct type. clang can be told the same
+    # thing (-fno-wchar), but that changes C++ mangling for every translation
+    # unit it touches, which is not a thing to do to one call site. Cast.
+    AWC="$SRC/src/java.desktop/windows/native/libawt/windows/awt_Component.cpp"
+    if [ -f "$AWC" ] && grep -q '^ *wChar, 2, 0, GetKeyboardLayout());' "$AWC"; then
+      perl -0pi -e 's/^(\s+)wChar, 2, 0, GetKeyboardLayout\(\)\);/$1(LPWSTR)wChar, 2, 0, GetKeyboardLayout());/m' "$AWC"
+      log "Casting the ToUnicodeEx buffer in awt_Component.cpp"
     fi
 
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
