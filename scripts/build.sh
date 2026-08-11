@@ -250,12 +250,14 @@ case "$PLATFORM" in
       # clang parses __try/__except only with MS extensions enabled. It
       # implements SEH for x86_64 and aarch64 windows; 32-bit x86 it does not,
       # so i686 is expected to need a different answer here.
-      # NOMINMAX and _WIN32_WINNT come from the same place: flags-cflags.m4 sets
-      # -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0602 for windows, but
-      # only in the microsoft branch, so a clang windows build gets none of them.
-      # windows.h's min/max macros break std::min/std::max, and the WINNT level
-      # decides which APIs are declared at all.
-      WIN_DEFS="-DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0602"
+      # flags-cflags.m4 sets -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0602 for
+      # every windows binary, but only in the microsoft branch, so a clang
+      # windows build gets neither. NOMINMAX belongs with them but is added to
+      # ALWAYS_DEFINES_JVM alone -- hotspot wants windows.h's min/max macros
+      # gone so they cannot shadow std::min/std::max, while the JDK libraries
+      # still use min() as a macro (ProcessImpl_md.c does). It is applied to the
+      # JVM only, further down.
+      WIN_DEFS="-DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0602"
       # -Wno-nonportable-include-path: the aliases above are exactly what that
       # warning is for -- <Windows.h> resolving to a file named windows.h -- so
       # it fires on every capitalised include in the tree, hundreds of times,
@@ -376,8 +378,8 @@ case "$PLATFORM" in
     fi
 
     if [ -f "$FCF" ] && grep -q '^    ALWAYS_DEFINES_JVM="-D_GNU_SOURCE"$' "$FCF"; then
-      perl -0pi -e 's/^    ALWAYS_DEFINES_JVM="-D_GNU_SOURCE"$/    if test "x\$OPENJDK_TARGET_OS" = xwindows; then\n      ALWAYS_DEFINES_JVM=""\n    else\n      ALWAYS_DEFINES_JVM="-D_GNU_SOURCE"\n    fi/m' "$FCF"
-      log "Not defining _GNU_SOURCE for a windows target"
+      perl -0pi -e 's/^    ALWAYS_DEFINES_JVM="-D_GNU_SOURCE"$/    if test "x\$OPENJDK_TARGET_OS" = xwindows; then\n      ALWAYS_DEFINES_JVM="-DNOMINMAX"\n    else\n      ALWAYS_DEFINES_JVM="-D_GNU_SOURCE"\n    fi/m' "$FCF"
+      log "Swapping _GNU_SOURCE for NOMINMAX on a windows JVM build"
     fi
 
     # The target was being classified as a unix one, so the build pulled in
