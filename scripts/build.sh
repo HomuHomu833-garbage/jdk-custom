@@ -250,8 +250,14 @@ case "$PLATFORM" in
       # clang parses __try/__except only with MS extensions enabled. It
       # implements SEH for x86_64 and aarch64 windows; 32-bit x86 it does not,
       # so i686 is expected to need a different answer here.
-      EXTRA_CONF+=(--with-extra-cflags="-I$CASE_INC -DWIN32_LEAN_AND_MEAN -fms-extensions"
-                   --with-extra-cxxflags="-I$CASE_INC -DWIN32_LEAN_AND_MEAN -fms-extensions")
+      # NOMINMAX and _WIN32_WINNT come from the same place: flags-cflags.m4 sets
+      # -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0602 for windows, but
+      # only in the microsoft branch, so a clang windows build gets none of them.
+      # windows.h's min/max macros break std::min/std::max, and the WINNT level
+      # decides which APIs are declared at all.
+      WIN_DEFS="-DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0602"
+      EXTRA_CONF+=(--with-extra-cflags="-I$CASE_INC $WIN_DEFS -fms-extensions"
+                   --with-extra-cxxflags="-I$CASE_INC $WIN_DEFS -fms-extensions")
     fi
 
     # GetProcAddress returns FARPROC, a function pointer, and C++ has no
@@ -262,9 +268,23 @@ case "$PLATFORM" in
     # Cast it, the way the same file already does elsewhere for GetProcAddress
     # results.
     OSW="$SRC/src/hotspot/os/windows/os_windows.cpp"
-    if [ -f "$OSW" ] && grep -q '^  return ::GetProcAddress(nullptr, name);$' "$OSW"; then
+    if [ -f "$OSW" ] && grep -q '::GetProcAddress' "$OSW"; then
       perl -pi -e 's/^  return ::GetProcAddress\(nullptr, name\);$/  return reinterpret_cast<void*>(::GetProcAddress(nullptr, name));/' "$OSW"
-      log "Casting GetProcAddress through reinterpret_cast in os::lookup_function"
+      perl -pi -e 's/^  void\* ret = ::GetProcAddress\(\(HMODULE\)lib, name\);$/  void* ret = reinterpret_cast<void*>(::GetProcAddress((HMODULE)lib, name));/' "$OSW"
+      log "Casting the GetProcAddress results in os::dll_lookup and os::lookup_function"
+    fi
+
+    # _GNU_SOURCE has no business being defined for a windows target, and it
+    # steers shared code down glibc paths:
+    #   os.cpp:186: error: no member named 'tm_gmtoff' in 'tm'
+    # because os.cpp tests for _GNU_SOURCE before _WINDOWS when picking how to
+    # find the UTC offset. flags-cflags.m4 sets it for the whole gcc/clang
+    # toolchain family without asking what the target is. Set it only where it
+    # means something.
+    FCF="$SRC/make/autoconf/flags-cflags.m4"
+    if [ -f "$FCF" ] && grep -q '^    ALWAYS_DEFINES_JVM="-D_GNU_SOURCE"$' "$FCF"; then
+      perl -0pi -e 's/^    ALWAYS_DEFINES_JVM="-D_GNU_SOURCE"$/    if test "x\$OPENJDK_TARGET_OS" = xwindows; then\n      ALWAYS_DEFINES_JVM=""\n    else\n      ALWAYS_DEFINES_JVM="-D_GNU_SOURCE"\n    fi/m' "$FCF"
+      log "Not defining _GNU_SOURCE for a windows target"
     fi
 
     # The target was being classified as a unix one, so the build pulled in
