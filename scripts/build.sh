@@ -256,8 +256,13 @@ case "$PLATFORM" in
       # windows.h's min/max macros break std::min/std::max, and the WINNT level
       # decides which APIs are declared at all.
       WIN_DEFS="-DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0602"
-      EXTRA_CONF+=(--with-extra-cflags="-I$CASE_INC $WIN_DEFS -fms-extensions"
-                   --with-extra-cxxflags="-I$CASE_INC $WIN_DEFS -fms-extensions")
+      # -Wno-nonportable-include-path: the aliases above are exactly what that
+      # warning is for -- <Windows.h> resolving to a file named windows.h -- so
+      # it fires on every capitalised include in the tree, hundreds of times,
+      # for something deliberate. Silencing it keeps real diagnostics findable.
+      WIN_CFLAGS="-I$CASE_INC $WIN_DEFS -fms-extensions -Wno-nonportable-include-path"
+      EXTRA_CONF+=(--with-extra-cflags="$WIN_CFLAGS"
+                   --with-extra-cxxflags="$WIN_CFLAGS")
     fi
 
     # GetProcAddress returns FARPROC, a function pointer, and C++ has no
