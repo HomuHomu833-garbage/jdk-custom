@@ -166,6 +166,21 @@ case "$PLATFORM" in
       sed -i 's|VALID_TOOLCHAINS_windows="microsoft"|VALID_TOOLCHAINS_windows="microsoft clang"|' "$f"
       log "Allowing the clang toolchain for windows targets"
     done
+
+    # Same shape again: lib-std.m4 hunts for the Visual Studio runtime DLLs to
+    # bundle into the image whenever the target is windows, though they are a
+    # microsoft-toolchain artifact —
+    #   configure: error: Could not find . Please specify using --with-msvcr-dll
+    # (the name is blank because MSVCR_NAME is only set by the VS detection that
+    # never ran). mingw links the system msvcrt and carries its own runtime,
+    # which -static folds in, so there is nothing to find or ship.
+    for f in "$SRC/make/autoconf/lib-std.m4"; do
+      [ -f "$f" ] || continue
+      grep -q 'TOOLCHAIN_SETUP_VS_RUNTIME_DLLS' "$f" || continue
+      perl -0pi -e 's/  if test "x\$OPENJDK_TARGET_OS" = "xwindows"; then\n    TOOLCHAIN_SETUP_VS_RUNTIME_DLLS\n  fi\n/  if test "x\$OPENJDK_TARGET_OS" = "xwindows" \&\& test "x\$TOOLCHAIN_TYPE" = "xmicrosoft"; then\n    TOOLCHAIN_SETUP_VS_RUNTIME_DLLS\n  fi\n/m' "$f"
+      grep -q 'xmicrosoft"; then' "$f" &&
+        log "Skipping the Visual Studio runtime DLLs (mingw has none)"
+    done
     # Fold llvm-mingw's own runtime -- libunwind, libc++, libwinpthread -- into
     # each binary, so the JDK does not need those DLLs shipped beside it. This is
     # as static as Windows gets: the CRT itself (msvcrt/ucrtbase) is an OS
