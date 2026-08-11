@@ -624,23 +624,34 @@ EOF
     # identifier as a string resource name; llvm-rc does not:
     #   llvm-rc: Error parsing file: expected int or string, got
     #   cjaccessinspectorMenus
-    # Quote it, which is what MSVC decided it meant -- but only where the name
-    # is being defined ("<name> MENU"), not where the dialog refers to it
-    # ("MENU <name>"). The two positions take different things: llvm-rc wants
-    # an int or string for the name of a resource and an int or identifier for
-    # the reference to one, so quoting both trades one parse error for the
-    # other. Only names that really are undefined are touched -- quoting a
-    # macro would turn an integer id into a string one.
+    # Quote it, which is what MSVC decided it meant -- but only where the
+    # dialog refers to the menu ("MENU <name>"), not where the menu declares
+    # itself ("<name> MENU"). The two positions take different things: llvm-rc
+    # wants an int or string for the reference and an int or identifier for the
+    # declaration, so quoting both, or the wrong one, just trades one parse
+    # error for the other. Only names that really are undefined are touched --
+    # quoting a macro would turn an integer id into a string one.
     for rc in "$SRC"/src/jdk.accessibility/windows/native/*/*.rc; do
       [ -f "$rc" ] || continue
-      for tok in $(sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*) MENU$/\1/p' "$rc" | sort -u); do
+      for tok in $(sed -nE 's/^MENU ([A-Za-z_][A-Za-z0-9_]*)$/\1/p' "$rc" | sort -u); do
         if grep -rqE "^#define[[:space:]]+$tok\b" "$SRC/src/jdk.accessibility"; then
           continue
         fi
-        sed -i -E "s/^$tok MENU\$/\"$tok\" MENU/" "$rc"
-        log "Quoting the undefined resource name $tok in $(basename "$rc")"
+        sed -i -E "s/^MENU $tok\$/MENU \"$tok\"/" "$rc"
+        log "Quoting the undefined menu reference $tok in $(basename "$rc")"
       done
     done
+
+    # splashscreen_sys.c calls alloca without including <malloc.h>, where both
+    # MSVC and mingw declare it -- MSVC's windows.h chain happens to pull it in:
+    #   splashscreen_sys.c:147: error: use of undeclared identifier 'alloca'
+    SPL="$SRC/src/java.desktop/windows/native/libsplashscreen/splashscreen_sys.c"
+    if [ -f "$SPL" ] && ! grep -q '^#include <malloc.h>$' "$SPL"; then
+      perl -0pi -e 's/^#include "splashscreen_impl\.h"$/#include <malloc.h>\n#include "splashscreen_impl.h"/m' "$SPL"
+      grep -q '^#include <malloc.h>$' "$SPL" || {
+        echo "failed to include <malloc.h> in splashscreen_sys.c" >&2; exit 1; }
+      log "Including <malloc.h> for alloca in splashscreen_sys.c"
+    fi
 
     # A library with C++ sources has to be linked by the C++ driver, or the
     # runtime it needs is simply absent:
