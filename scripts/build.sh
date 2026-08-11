@@ -380,8 +380,10 @@ EOF
           print "  ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
           print "    $1_LIBS := $$(patsubst %.lib,-l%,$$($1_LIBS))"
           print "    $1_EXTRA_LIBS := $$(patsubst %.lib,-l%,$$($1_EXTRA_LIBS))"
-          print "    # -stack:N is link.exe'\''s spelling of --stack."
+          print "    # -stack:N is link.exe'\''s spelling of --stack. LDFLAGS_windows"
+          print "    # arrives in EXTRA_LDFLAGS, so both have to be translated."
           print "    $1_LDFLAGS := $$(patsubst -stack:%,-Wl$$(COMMA)--stack$$(COMMA)%,$$($1_LDFLAGS))"
+          print "    $1_EXTRA_LDFLAGS := $$(patsubst -stack:%,-Wl$$(COMMA)--stack$$(COMMA)%,$$($1_EXTRA_LDFLAGS))"
           print "  endif"
           done = 1
         }
@@ -723,24 +725,22 @@ EOF
     #   'wchar_t *'
     # It compiles under MSVC because the JDK builds windows C++ with
     # -Zc:wchar_t-, making wchar_t a typedef for unsigned short rather than a
-    # type of its own -- jabswitch's CXXFLAGS_FILTER_OUT for that very flag is
-    # what shows it is set globally. clang spells the same thing -fno-wchar.
-    # Applied to this one library rather than the whole build: it changes C++
-    # name mangling for anything it touches, and llvm-mingw's libc++ was built
-    # with the ordinary wchar_t. libsunmscapi uses no wide std facilities, so
-    # nothing it links against can notice.
-    MSC="$SRC/make/modules/jdk.crypto.mscapi/Lib.gmk"
-    if [ -f "$MSC" ] && ! grep -q 'fno-wchar' "$MSC"; then
-      awk '
-        { print }
-        !done && index($0, "NAME := sunmscapi,") {
-          print "      CXXFLAGS := -Xclang -fno-wchar, \\"
-          done = 1
-        }
-      ' "$MSC" > "$MSC.tmp" && mv "$MSC.tmp" "$MSC"
-      grep -q 'fno-wchar' "$MSC" || {
-        echo "failed to add -fno-wchar to the sunmscapi library" >&2; exit 1; }
-      log "Building libsunmscapi with wchar_t as unsigned short, as MSVC does"
+    # type of its own. clang spells that -fno-wchar, and it cannot be used
+    # here: mingw's headers take a builtin wchar_t for granted in C++ and stop
+    # declaring the type at all without it, so corecrt.h and stdio.h fall over
+    # with "unknown type name 'wchar_t'". Cast at the JNI boundary instead --
+    # both types are 16-bit unsigned on windows, which is the assumption the
+    # MSVC flag encodes anyway.
+    SEC="$SRC/src/jdk.crypto.mscapi/windows/native/libsunmscapi/security.cpp"
+    if [ -f "$SEC" ] && ! grep -q '(const jchar\*)pszNameString' "$SEC"; then
+      sed -i \
+        -e 's/env->NewString(pszNameString, nameLen)/env->NewString((const jchar*)pszNameString, nameLen)/g' \
+        -e 's/(pszCertAliasName = env->GetStringChars(jCertAliasName, NULL))/(pszCertAliasName = (const wchar_t*)env->GetStringChars(jCertAliasName, NULL))/g' \
+        -e 's/env->ReleaseStringChars(jCertAliasName, pszCertAliasName)/env->ReleaseStringChars(jCertAliasName, (const jchar*)pszCertAliasName)/g' \
+        "$SEC"
+      grep -q '(const jchar\*)pszNameString' "$SEC" || {
+        echo "failed to cast the JNI string arguments in security.cpp" >&2; exit 1; }
+      log "Casting between WCHAR and jchar in security.cpp"
     fi
 
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
