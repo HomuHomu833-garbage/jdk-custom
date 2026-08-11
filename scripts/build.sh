@@ -254,6 +254,19 @@ case "$PLATFORM" in
                    --with-extra-cxxflags="-I$CASE_INC -DWIN32_LEAN_AND_MEAN -fms-extensions")
     fi
 
+    # GetProcAddress returns FARPROC, a function pointer, and C++ has no
+    # implicit conversion from one of those to void*. MSVC allows it as an
+    # extension; clang does not:
+    #   os_windows.cpp:1456: error: cannot initialize return object of type
+    #   'void *' with an rvalue of type 'FARPROC'
+    # Cast it, the way the same file already does elsewhere for GetProcAddress
+    # results.
+    OSW="$SRC/src/hotspot/os/windows/os_windows.cpp"
+    if [ -f "$OSW" ] && grep -q '^  return ::GetProcAddress(nullptr, name);$' "$OSW"; then
+      perl -pi -e 's/^  return ::GetProcAddress\(nullptr, name\);$/  return reinterpret_cast<void*>(::GetProcAddress(nullptr, name));/' "$OSW"
+      log "Casting GetProcAddress through reinterpret_cast in os::lookup_function"
+    fi
+
     # The target was being classified as a unix one, so the build pulled in
     # src/java.base/unix/classes and the other unix source roots:
     #   unix/classes/sun/nio/fs/UnixPath.java: error: cannot find symbol
