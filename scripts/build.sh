@@ -350,6 +350,15 @@ case "$PLATFORM" in
       log "Skipping the dumpbin-generated jvm.dll export file"
     fi
 
+    # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
+    # headers happen to drag it in, mingw's do not:
+    #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
+    WNT="$SRC/src/java.base/windows/native/libjava/WinNTFileSystem_md.c"
+    if [ -f "$WNT" ] && ! grep -q '^#include <errno.h>$' "$WNT"; then
+      perl -0pi -e 's/^#include <limits\.h>$/#include <errno.h>\n#include <limits.h>/m' "$WNT"
+      log "Including <errno.h> in WinNTFileSystem_md.c"
+    fi
+
     OSW="$SRC/src/hotspot/os/windows/os_windows.cpp"
     if [ -f "$OSW" ] && grep -q '::GetProcAddress' "$OSW"; then
       perl -pi -e 's/^  return ::GetProcAddress\(nullptr, name\);$/  return reinterpret_cast<void*>(::GetProcAddress(nullptr, name));/' "$OSW"
