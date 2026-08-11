@@ -309,6 +309,39 @@ case "$PLATFORM" in
       log "Translating foo.lib into -lfoo for the mingw linker"
     fi
 
+    # JdkNativeCompilation.gmk picks the flag spelling for module libraries by
+    # OS: -libpath:<dir> and name.lib for windows, -L<dir> and -lname
+    # otherwise. lld in GNU mode reads -libpath:... as -l ibpath:...:
+    #   lld: error: unable to find library -libpath:.../modules_libs/java.base
+    #   lld: error: unable to find library -ljvm
+    # mingw wants the unix flag spelling with the windows file naming, and
+    # lld's mingw mode does search for <name>.lib, which is what the import
+    # libraries are called. Split the choice by toolchain and leave LIBFILE --
+    # the make dependency -- named as before.
+    JNC="$SRC/make/common/JdkNativeCompilation.gmk"
+    if [ -f "$JNC" ] && grep -q 'LDFLAGS += -libpath:' "$JNC"; then
+      awk '
+        skip > 0 { skip--; next }
+        index($0, "ifeq ($$(filter -libpath:$$($1_$2_LIBPATH), $$($1_LDFLAGS)), )") {
+          print "      ifeq ($(TOOLCHAIN_TYPE), microsoft)"
+          print "        ifeq ($$(filter -libpath:$$($1_$2_LIBPATH), $$($1_LDFLAGS)), )"
+          print "          $1_LDFLAGS += -libpath:$$($1_$2_LIBPATH)"
+          print "        endif"
+          print "        $1_LIBS += $$($1_$2_NAME)$(STATIC_LIBRARY_SUFFIX)"
+          print "      else"
+          print "        ifeq ($$(filter -L$$($1_$2_LIBPATH), $$($1_LDFLAGS)), )"
+          print "          $1_LDFLAGS += -L$$($1_$2_LIBPATH)"
+          print "        endif"
+          print "        $1_LIBS += -l$$($1_$2_NAME)"
+          print "      endif"
+          skip = 3
+          next
+        }
+        { print }
+      ' "$JNC" > "$JNC.tmp" && mv "$JNC.tmp" "$JNC"
+      log "Using -L/-l instead of -libpath: for the module libraries"
+    fi
+
     # jvm.dll links, and then everything that depends on it cannot:
     #   No rule to make target '.../modules_libs/java.base/jvm.lib', needed by
     #   '.../verify.dll'
