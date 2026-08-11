@@ -262,7 +262,16 @@ case "$PLATFORM" in
       # warning is for -- <Windows.h> resolving to a file named windows.h -- so
       # it fires on every capitalised include in the tree, hundreds of times,
       # for something deliberate. Silencing it keeps real diagnostics findable.
-      WIN_CFLAGS="-I$CASE_INC $WIN_DEFS -fms-extensions -Wno-nonportable-include-path"
+      # The windows sources were written against MSVC, which takes mismatched
+      # pointer types and implicit int conversions as warnings; clang 16 and
+      # later reject them outright:
+      #   java_md.c:705: error: incompatible pointer types passing 'int *' to
+      #   parameter of type 'LPDWORD' (aka 'unsigned long *')
+      # DWORD and int are both 32-bit on windows, so these are benign in fact,
+      # and there are too many across the tree to hand-edit. Demote them to
+      # warnings rather than silencing them, so they stay visible in the log.
+      WIN_LAX="-Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+      WIN_CFLAGS="-I$CASE_INC $WIN_DEFS -fms-extensions -Wno-nonportable-include-path $WIN_LAX"
       EXTRA_CONF+=(--with-extra-cflags="$WIN_CFLAGS"
                    --with-extra-cxxflags="$WIN_CFLAGS")
     fi
