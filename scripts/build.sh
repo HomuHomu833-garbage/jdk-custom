@@ -181,6 +181,23 @@ case "$PLATFORM" in
       grep -q 'xmicrosoft"; then' "$f" &&
         log "Skipping the Visual Studio runtime DLLs (mingw has none)"
     done
+
+    # Consequence of skipping the windows host setup: it is also what defines
+    # FIXPATH_BASE, the helper that rewrites unix paths into windows ones.
+    # MakeBase.gmk reaches for it on any windows target, so the command
+    # collapses to a bare "convert" and the build tools fail:
+    #   /usr/bin/bash: line 1: convert: command not found
+    # Cross-compiling from linux there is nothing to rewrite -- every tool in
+    # the build is a linux executable taking linux paths -- so fall through to
+    # the identity definitions the other platforms use, but only when
+    # FIXPATH_BASE is genuinely absent, leaving a real windows host untouched.
+    MB="$SRC/make/common/MakeBase.gmk"
+    if [ -f "$MB" ] && grep -q 'FIXPATH_BASE' "$MB"; then
+      # The line occurs exactly once in 11 through 25, so no first-match dance.
+      perl -pi -e 's/^ifeq \(\$\(call isTargetOs, windows\), true\)$/ifeq (\$(call isTargetOs, windows)\$(if \$(FIXPATH_BASE),,-nofixpath), true)/' "$MB"
+      grep -q 'nofixpath' "$MB" &&
+        log "Using identity FixPath (no fixpath helper in a cross build)"
+    fi
     # Fold llvm-mingw's own runtime -- libunwind, libc++, libwinpthread -- into
     # each binary, so the JDK does not need those DLLs shipped beside it. This is
     # as static as Windows gets: the CRT itself (msvcrt/ucrtbase) is an OS
