@@ -538,6 +538,18 @@ EOF
       log "Taking std::bad_alloc from <new> in libawt's alloc.h"
     fi
 
+    # The other half of that: awt_DnDDS.cpp renames the STL's bad_alloc to
+    # zbad_alloc across its <new> and <map> includes, so the STL copy could
+    # coexist with the one alloc.h used to declare. With alloc.h now taking the
+    # real one, that rename hides it instead:
+    #   awt.h:274: error: no member named 'bad_alloc' in namespace 'std';
+    #   did you mean 'zbad_alloc'?
+    # The rename exists only to avoid the duplicate that no longer happens.
+    for f in $(grep -rl '#define bad_alloc zbad_alloc' "$SRC/src/java.desktop" 2>/dev/null || true); do
+      perl -ni -e 'print unless /^#define bad_alloc zbad_alloc$/' "$f"
+      log "Dropping the zbad_alloc rename in $(basename "$f")"
+    done
+
     # ToUnicodeEx writes UTF-16 code units into a WORD[2] and is declared to
     # take LPWSTR. Both are 16-bit unsigned on windows, and C++ still refuses
     # the conversion:
@@ -552,6 +564,79 @@ EOF
       perl -0pi -e 's/^(\s+)wChar, 2, 0, GetKeyboardLayout\(\)\);/$1(LPWSTR)wChar, 2, 0, GetKeyboardLayout());/m' "$AWC"
       log "Casting the ToUnicodeEx buffer in awt_Component.cpp"
     fi
+
+    # awt_ole.h reaches for the COM smart pointers -- IStreamPtr and friends:
+    #   awt_DnDDT.cpp:819: error: unknown type name 'IStreamPtr'
+    # MSVC declares those in comdef.h. mingw has them too, in comdefsp.h, but
+    # that file disables itself unless USE___UUIDOF is 1, and _mingw.h sets that
+    # only for MSVC -- everyone else gets the template-based __uuidof emulation
+    # instead, which comdefsp.h was never taught about. Declare the ones this
+    # tree actually names, with comdef.h's own macro, so the emulation is what
+    # ends up being used. Each is guarded the way comdefsp.h guards its own, so
+    # an interface whose header has not been reached yet stays a visible error
+    # rather than a silently missing typedef.
+    OLEH="$SRC/src/java.desktop/windows/native/libawt/windows/awt_ole.h"
+    if [ -f "$OLEH" ] && ! grep -q '_COM_SMARTPTR_TYPEDEF' "$OLEH"; then
+      COM_PTRS="$BUILD_DIR/com-smartptrs.h"
+      : > "$COM_PTRS"
+      grep -rhoE '\bI[A-Za-z0-9_]+Ptr\b' "$SRC/src/java.desktop/windows" 2>/dev/null \
+        | sed 's/Ptr$//' | sort -u \
+        | while read -r iface; do
+            printf '#if defined(__%s_INTERFACE_DEFINED__)\n_COM_SMARTPTR_TYPEDEF(%s, __uuidof(%s));\n#endif\n' \
+              "$iface" "$iface" "$iface" >> "$COM_PTRS"
+          done
+      if [ -s "$COM_PTRS" ]; then
+        awk -v ptrs="$COM_PTRS" '
+          { print }
+          !done && $0 == "#include <comutil.h>" {
+            print ""
+            print "// mingw ships these in comdefsp.h but compiles it out for non-MSVC."
+            while ((getline line < ptrs) > 0) print line
+            close(ptrs)
+            done = 1
+          }
+        ' "$OLEH" > "$OLEH.tmp" && mv "$OLEH.tmp" "$OLEH"
+        grep -q '_COM_SMARTPTR_TYPEDEF' "$OLEH" || {
+          echo "failed to add the COM smart pointer typedefs to awt_ole.h" >&2; exit 1; }
+        log "Declaring $(grep -c _COM_SMARTPTR_TYPEDEF "$COM_PTRS") COM smart pointers in awt_ole.h"
+      fi
+    fi
+
+    # sspi.cpp defines the gss_* entry points with __declspec(dllexport) while
+    # gssapi.h has already declared them without it. MSVC allows an export
+    # attribute to appear only on the definition; clang rejects it once the
+    # earlier declaration has been used, which is why exactly the seven
+    # functions called from higher up in the file failed:
+    #   error: redeclaration of 'gss_release_cred' cannot add 'dllexport'
+    # Drop the attribute from all of them. It is the only file in the library,
+    # so with no explicit exports left, mingw falls back to exporting every
+    # symbol -- which is what a bridge DLL resolved through GetProcAddress
+    # needs anyway.
+    SSPI="$SRC/src/java.security.jgss/windows/native/libsspi_bridge/sspi.cpp"
+    if [ -f "$SSPI" ] && grep -q '^__declspec(dllexport) ' "$SSPI"; then
+      log "Dropping $(grep -c '^__declspec(dllexport) ' "$SSPI") dllexport attributes from sspi.cpp"
+      sed -i 's/^__declspec(dllexport) //' "$SSPI"
+    fi
+
+    # jaccessinspectorWindow.rc names its menu cjaccessinspectorMenus, which no
+    # header defines -- the resource header still calls it cFerretMenus, from
+    # before the tool was renamed. MSVC's rc quietly treats an unknown
+    # identifier as a string resource name; llvm-rc does not:
+    #   llvm-rc: Error parsing file: expected int or string, got
+    #   cjaccessinspectorMenus
+    # Quote it, which is what MSVC decided it meant. Only names that really are
+    # undefined get quoted -- quoting a macro would turn an integer id into a
+    # string one and stop the dialog finding its menu.
+    for rc in "$SRC"/src/jdk.accessibility/windows/native/*/*.rc; do
+      [ -f "$rc" ] || continue
+      for tok in $(sed -nE 's/^MENU ([A-Za-z_][A-Za-z0-9_]*)$/\1/p' "$rc" | sort -u); do
+        if grep -rqE "^#define[[:space:]]+$tok\b" "$SRC/src/jdk.accessibility"; then
+          continue
+        fi
+        sed -i -E "s/^MENU $tok\$/MENU \"$tok\"/; s/^$tok MENU\$/\"$tok\" MENU/" "$rc"
+        log "Quoting the undefined resource name $tok in $(basename "$rc")"
+      done
+    done
 
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
