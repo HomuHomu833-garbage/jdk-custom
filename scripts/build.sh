@@ -298,6 +298,39 @@ case "$PLATFORM" in
       log "Translating foo.lib into -lfoo for the mingw linker"
     fi
 
+    # jvm.dll links, and then everything that depends on it cannot:
+    #   No rule to make target '.../modules_libs/java.base/jvm.lib', needed by
+    #   '.../verify.dll'
+    # MSVC emits an import library beside every DLL, and the build copies
+    # jvm.lib into place for the java.* libraries to link against.
+    # LinkMicrosoft.gmk arranges that with -implib: and a rule to retrigger
+    # dependants; the generic Link.gmk has no equivalent, because on ELF there
+    # is nothing to emit. mingw will produce one on request, so ask for it under
+    # the same name the rest of the build already expects.
+    if [ -f "$LNK" ] && ! grep -q 'out-implib' "$LNK"; then
+      awk '
+        { print }
+        !done && $0 == "define CreateDynamicLibraryOrExecutable" {
+          print "  # mingw emits an import library only when asked; MSVC always does,"
+          print "  # and the rest of the build expects one to exist."
+          print "  ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
+          print "    ifeq ($$($1_TYPE), LIBRARY)"
+          print "      $1_IMPORT_LIBRARY := $$($1_OBJECT_DIR)/$$($1_NAME).lib"
+          print "      $1_EXTRA_LDFLAGS += -Wl,--out-implib=$$($1_IMPORT_LIBRARY)"
+          print ""
+          print "      $$($1_IMPORT_LIBRARY): $$($1_TARGET)"
+          printf "\t$(TOUCH) $$@\n"
+          print ""
+          print "      $1 += $$($1_IMPORT_LIBRARY)"
+          print "    endif"
+          print "  endif"
+          print ""
+          done = 1
+        }
+      ' "$LNK" > "$LNK.tmp" && mv "$LNK.tmp" "$LNK"
+      log "Emitting import libraries for the mingw DLL links"
+    fi
+
     # All of hotspot compiles now; the export machinery is next. CompileJvm.gmk
     # builds a .def listing the C++ vftable symbols to export from jvm.dll by
     # running MSVC's dumpbin over the object files, and passes it as -def:. The
