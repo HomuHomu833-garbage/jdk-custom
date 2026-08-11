@@ -133,6 +133,39 @@ case "$PLATFORM" in
     EXTRA_CONF+=(AR="$TC/bin/${TARGET}-ar" NM="$TC/bin/${TARGET}-nm" STRIP="$TC/bin/${TARGET}-strip" OBJCOPY="$TC/bin/${TARGET}-objcopy" OBJDUMP="$TC/bin/${TARGET}-objdump")
     export RC="$TC/bin/${TARGET}-windres"
     TARGET_OS=windows
+
+    # Two configure assumptions stand between llvm-mingw and a windows target,
+    # both keyed on the target OS rather than on what is actually true of the
+    # build host or the compiler:
+    #
+    #   basic.m4 runs BASIC_SETUP_PATHS_WINDOWS whenever the *target* is
+    #   windows, and that macro wants a windows environment underneath it --
+    #   cygpath or wslpath, then a cmd.exe it can execute:
+    #     configure: error: Incorrect linux installation. Neither cygpath nor
+    #     wslpath was found
+    #   None of it is needed when the build host is linux and the toolchain
+    #   emits PE binaries directly, so run it only when the host really is
+    #   windows.
+    #
+    #   toolchain.m4 allows only "microsoft" for windows targets. The link
+    #   layer underneath is keyed on TOOLCHAIN_TYPE, not on the OS -- Link.gmk
+    #   already carries a clang branch, and LinkMicrosoft.gmk only supplies
+    #   macros the microsoft path calls -- so clang is worth allowing through.
+    #
+    # Whether that is enough is exactly what the next run measures; this is the
+    # first step of an unsupported configuration, not a finished one.
+    for f in "$SRC/make/autoconf/basic.m4" "$SRC/common/autoconf/basic.m4"; do
+      [ -f "$f" ] || continue
+      grep -q '^  if test "x$OPENJDK_TARGET_OS" = "xwindows"; then$' "$f" || continue
+      perl -0pi -e 's/^  if test "x\$OPENJDK_TARGET_OS" = "xwindows"; then\n    BASIC_SETUP_PATHS_WINDOWS\n  fi\n/  if test "x\$OPENJDK_TARGET_OS" = "xwindows" \&\& test "x\$OPENJDK_BUILD_OS" = "xwindows"; then\n    BASIC_SETUP_PATHS_WINDOWS\n  fi\n/m' "$f"
+      log "Skipping the windows host-environment setup (cross build from linux)"
+    done
+    for f in "$SRC/make/autoconf/toolchain.m4" "$SRC/common/autoconf/toolchain.m4"; do
+      [ -f "$f" ] || continue
+      grep -q 'VALID_TOOLCHAINS_windows="microsoft"' "$f" || continue
+      sed -i 's|VALID_TOOLCHAINS_windows="microsoft"|VALID_TOOLCHAINS_windows="microsoft clang"|' "$f"
+      log "Allowing the clang toolchain for windows targets"
+    done
     # Fold llvm-mingw's own runtime -- libunwind, libc++, libwinpthread -- into
     # each binary, so the JDK does not need those DLLs shipped beside it. This is
     # as static as Windows gets: the CRT itself (msvcrt/ucrtbase) is an OS
