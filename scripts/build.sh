@@ -214,6 +214,42 @@ case "$PLATFORM" in
       perl -pi -e 's/\/bin\/java\$\(EXECUTABLE_SUFFIX\)/\/bin\/java/g' "$GLOD"
       log "Depending on the build JDK's launcher without a .exe suffix"
     fi
+
+    # From here on the problems are hotspot's rather than the build system's.
+    #
+    # alloca lives in <malloc.h> on mingw, not <alloca.h>; globalDefinitions_gcc
+    # is written for unix and includes the latter unconditionally.
+    GD="$SRC/src/hotspot/share/utilities/globalDefinitions_gcc.hpp"
+    if [ -f "$GD" ] && grep -q '^#include <alloca.h>$' "$GD"; then
+      perl -0pi -e 's/^#include <alloca\.h>$/#ifdef __MINGW32__\n#include <malloc.h>\n#else\n#include <alloca.h>\n#endif/m' "$GD"
+      log "Taking alloca from <malloc.h> (mingw has no <alloca.h>)"
+    fi
+
+    # hotspot poisons sprintf/vsprintf/vsnprintf by redeclaring them extern "C".
+    # mingw's stdio.h declares its own ANSI-stdio versions with C++ linkage, so
+    # the two collide before anything else can compile:
+    #   error: declaration of 'sprintf' has a different language linkage
+    # Leave those three unpoisoned on mingw; the os:: replacements they point at
+    # are still what the code calls.
+    FF="$SRC/src/hotspot/share/utilities/forbiddenFunctions.hpp"
+    if [ -f "$FF" ] && grep -q 'FORBID_C_FUNCTION(int sprintf' "$FF"; then
+      perl -0pi -e 's/(FORBID_C_FUNCTION\(int sprintf.*?PRAGMA_DIAG_POP\n)/#ifndef __MINGW32__\n$1#endif \/\/ !__MINGW32__\n/s' "$FF"
+      log "Not poisoning sprintf/vsprintf/vsnprintf (mingw declares them C++)"
+    fi
+
+    # CreateWindowsResourceFile compiles the .rc with RC (windres here, fine),
+    # then runs the *C compiler* over it a second time purely to list includes
+    # for a dependency file — with -showIncludes -nologo -TC -P -Fi, which the
+    # comment above it admits is misusing CL. clang refuses them:
+    #   clang: error: unknown argument: '-showIncludes'
+    # The dependency files are only ever -included, so skipping the step costs
+    # nothing on a clean build. Keep it for the microsoft toolchain.
+    CFG="$SRC/make/common/native/CompileFile.gmk"
+    if [ -f "$CFG" ] && grep -q 'showIncludes -nologo -TC' "$CFG"; then
+      perl -0pi -e 's/(\n\t\t\$\$\(call ExecuteWithLog, \$\$\(\$1_RES_DEPS_FILE\))/\n        ifeq (\$(TOOLCHAIN_TYPE), microsoft)$1/s' "$CFG"
+      perl -0pi -e 's/(> \$\$\(\$1_RES_DEPS_TARGETS_FILE\)\n)/$1        endif\n/s' "$CFG"
+      log "Skipping the MSVC-only resource dependency scan"
+    fi
     # Fold llvm-mingw's own runtime -- libunwind, libc++, libwinpthread -- into
     # each binary, so the JDK does not need those DLLs shipped beside it. This is
     # as static as Windows gets: the CRT itself (msvcrt/ucrtbase) is an OS
