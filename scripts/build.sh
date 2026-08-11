@@ -380,6 +380,8 @@ EOF
           print "  ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
           print "    $1_LIBS := $$(patsubst %.lib,-l%,$$($1_LIBS))"
           print "    $1_EXTRA_LIBS := $$(patsubst %.lib,-l%,$$($1_EXTRA_LIBS))"
+          print "    # -stack:N is link.exe'\''s spelling of --stack."
+          print "    $1_LDFLAGS := $$(patsubst -stack:%,-Wl$$(COMMA)--stack$$(COMMA)%,$$($1_LDFLAGS))"
           print "  endif"
           done = 1
         }
@@ -481,16 +483,24 @@ EOF
     # meeting them one build failure at a time. Deliberately absent: -MD and
     # -MT, which name a runtime library to cl.exe but dependency generation to
     # clang -- removing those would be a silent behaviour change, not a no-op.
-    MSVC_ONLY='EHsc|EHa|wd[0-9]+|Zc:[^ )]+|permissive-|utf-8|nologo|guard:cf|FS|GS|Gy|GR|Oy-'
+    # A comma ends an argument in these makefiles, so it has to be excluded from
+    # -Zc:'s value and accepted as a terminator in its own right. Getting that
+    # wrong ate the comma after CXXFLAGS_FILTER_OUT := -Zc:wchar_t-, which
+    # merged that argument with the CXXFLAGS following it -- so jabswitch lost
+    # its whole flag list, -DUNICODE included, and picked the ANSI half of every
+    # windows API while passing it wide literals.
+    MSVC_ONLY='EHsc|EHa|wd[0-9]+|Zc:[^ ),]+|Z[i7]|permissive-|utf-8|nologo'
+    MSVC_ONLY="$MSVC_ONLY|guard:cf|FS|GS|Gy|GR|Gd|Gm-?|Od|Ob[0-9]|Oi|Ot|Oy-?"
+    MSVC_ONLY="$MSVC_ONLY|RTC[1csu]+|MP|W[0-4]|WX-?|analyze-?|sdl-?"
     if [ -d "$SRC/make" ]; then
-      msvc_files=$(grep -rlE "(^|[[:space:]])-($MSVC_ONLY)([[:space:]]|$)" \
+      msvc_files=$(grep -rlE "(^|[[:space:]])-($MSVC_ONLY)([[:space:],]|$)" \
                      --include='*.gmk' "$SRC/make" 2>/dev/null || true)
       if [ -n "$msvc_files" ]; then
         # Twice: a removed flag takes its trailing space with it, so adjacent
         # flags (-EHsc -wd4244) are not both seen in a single pass.
         for _ in 1 2; do
           printf '%s\n' "$msvc_files" | xargs sed -E -i \
-            "s/(^|[[:space:]])-($MSVC_ONLY)([[:space:]]|$)/\\1\\3/g"
+            "s/(^|[[:space:]])-($MSVC_ONLY)([[:space:],]|$)/\\1\\3/g"
         done
         log "Dropped MSVC-only compiler flags from $(printf '%s\n' "$msvc_files" | wc -l) makefiles"
       fi
@@ -645,12 +655,17 @@ EOF
     # splashscreen_sys.c calls alloca without including <malloc.h>, where both
     # MSVC and mingw declare it -- MSVC's windows.h chain happens to pull it in:
     #   splashscreen_sys.c:147: error: use of undeclared identifier 'alloca'
+    # The include alone is not enough: mingw hides the unprefixed spelling
+    # behind NO_OLDNAMES, which _mingw.h sets whenever __STRICT_ANSI__ is, and
+    # the JDK compiles C as -std=c11 rather than gnu11. Rather than loosen the
+    # language level for the whole build, spell out the definition mingw would
+    # have given us -- it is the same __builtin_alloca either way.
     SPL="$SRC/src/java.desktop/windows/native/libsplashscreen/splashscreen_sys.c"
     if [ -f "$SPL" ] && ! grep -q '^#include <malloc.h>$' "$SPL"; then
-      perl -0pi -e 's/^#include "splashscreen_impl\.h"$/#include <malloc.h>\n#include "splashscreen_impl.h"/m' "$SPL"
-      grep -q '^#include <malloc.h>$' "$SPL" || {
-        echo "failed to include <malloc.h> in splashscreen_sys.c" >&2; exit 1; }
-      log "Including <malloc.h> for alloca in splashscreen_sys.c"
+      perl -0pi -e 's/^#include "splashscreen_impl\.h"$/#include <malloc.h>\n#ifndef alloca\n#define alloca(x) __builtin_alloca((x))\n#endif\n#include "splashscreen_impl.h"/m' "$SPL"
+      grep -q '^#define alloca(x) __builtin_alloca((x))$' "$SPL" || {
+        echo "failed to define alloca in splashscreen_sys.c" >&2; exit 1; }
+      log "Defining alloca in splashscreen_sys.c"
     fi
 
     # A library with C++ sources has to be linked by the C++ driver, or the
