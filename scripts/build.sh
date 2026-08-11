@@ -247,6 +247,18 @@ case "$PLATFORM" in
       log "Skipping the unix-only headers in globalDefinitions_gcc.hpp"
     fi
 
+    # Same header, further down: g_isnan is defined per platform for apple,
+    # linux, the BSDs and aix, and anything else gets
+    #   error: "missing platform-specific definition here"
+    # because windows is expected to have taken globalDefinitions_visCPP.hpp.
+    # isnan behaves the same on mingw, so mingw joins the linux branch. Only the
+    # #elif is touched — the #if above it pulls in ucontext.h and friends, which
+    # mingw genuinely lacks and must keep skipping.
+    if [ -f "$GD" ] && grep -q '^#error "missing platform-specific definition here"$' "$GD"; then
+      perl -0pi -e 's/^#elif defined\(LINUX\) \|\| defined\(_ALLBSD_SOURCE\) \|\| defined\(_AIX\)$/#elif defined(LINUX) || defined(_ALLBSD_SOURCE) || defined(_AIX) || defined(__MINGW32__)/m' "$GD"
+      log "Giving mingw the linux g_isnan definitions"
+    fi
+
     # hotspot poisons sprintf/vsprintf/vsnprintf by redeclaring them extern "C".
     # mingw's stdio.h declares its own ANSI-stdio versions with C++ linkage, so
     # the two collide before anything else can compile:
