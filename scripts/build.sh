@@ -237,6 +237,52 @@ case "$PLATFORM" in
             ln -sf "$MINGW_INC/$low" "$CASE_INC/$hdr"
           done
       log "Aliased $(ls -1 "$CASE_INC" | wc -l) capitalised windows headers"
+
+      # hotspot's windows_aarch64 orderAccess includes <arm64intr.h> for the
+      # barrier operand names. clang ships that header, but its body is behind
+      # #ifndef _MSC_VER -> #include_next <arm64intr.h>: it is an MSVC-only
+      # header that expects the platform SDK to provide the real one. mingw-w64
+      # has no arm64intr.h at all, so the delegation dead-ends:
+      #   arm64intr.h:12: fatal error: 'arm64intr.h' file not found
+      # Supply it here, ahead of clang's copy on the include path. The values
+      # are the architectural DMB/DSB operand encodings, not a Microsoft
+      # invention, so they are the same numbers clang's MSVC branch uses.
+      case "$TARGET" in
+        aarch64-*|arm64ec-*)
+          cat > "$CASE_INC/arm64intr.h" <<'EOF'
+#ifndef __ARM64INTR_H
+#define __ARM64INTR_H
+
+#define ARM64_SYSREG(op0, op1, crn, crm, op2) \
+        (((op0 & 1) << 14) | ((op1 & 7) << 11) | ((crn & 15) << 7) | \
+         ((crm & 15) << 3) | ((op2 & 7) << 0))
+
+#define ARM64_FPCR ARM64_SYSREG(3, 3, 4, 4, 0)
+#define ARM64_FPSR ARM64_SYSREG(3, 3, 4, 4, 1)
+
+typedef enum _tag_ARM64INTR_BARRIER_TYPE {
+  _ARM64_BARRIER_OSHLD = 0x1,
+  _ARM64_BARRIER_OSHST = 0x2,
+  _ARM64_BARRIER_OSH   = 0x3,
+  _ARM64_BARRIER_NSHLD = 0x5,
+  _ARM64_BARRIER_NSHST = 0x6,
+  _ARM64_BARRIER_NSH   = 0x7,
+  _ARM64_BARRIER_ISHLD = 0x9,
+  _ARM64_BARRIER_ISHST = 0xA,
+  _ARM64_BARRIER_ISH   = 0xB,
+  _ARM64_BARRIER_LD    = 0xD,
+  _ARM64_BARRIER_ST    = 0xE,
+  _ARM64_BARRIER_SY    = 0xF
+} _ARM64INTR_BARRIER_TYPE;
+
+/* __dmb / __isb / __dsb themselves come from mingw's intrin.h. */
+#include <intrin.h>
+
+#endif
+EOF
+          log "Providing an arm64intr.h shim (mingw-w64 ships none)"
+          ;;
+      esac
       # WIN32_LEAN_AND_MEAN keeps windows.h from pulling in rpc.h, objbase.h and
       # ole2.h, which are what define "interface" as a macro for struct. hotspot
       # uses that as an ordinary identifier -- opto/type.hpp has a bool
@@ -399,6 +445,20 @@ case "$PLATFORM" in
     if [ -f "$WNT" ] && ! grep -q '^#include <errno.h>$' "$WNT"; then
       perl -0pi -e 's/^#include <limits\.h>$/#include <errno.h>\n#include <limits.h>/m' "$WNT"
       log "Including <errno.h> in WinNTFileSystem_md.c"
+    fi
+
+    # java_props_md.c asks SHGetKnownFolderPath for FOLDERID_Profile:
+    #   ld.lld: error: undefined symbol: FOLDERID_Profile
+    # DEFINE_GUID in the SDK headers only declares the GUID; something has to
+    # define it. MSVC picks the definition up from uuid.lib, which it links by
+    # default. mingw's guiddef.h follows the documented alternative: include
+    # <initguid.h> first and DEFINE_GUID emits a (selectany) definition in this
+    # translation unit instead. That is self-contained, so it does not depend on
+    # which GUIDs a given mingw-w64 libuuid.a happens to carry.
+    JPM="$SRC/src/java.base/windows/native/libjava/java_props_md.c"
+    if [ -f "$JPM" ] && ! grep -q 'initguid\.h' "$JPM"; then
+      perl -0pi -e 's/^#include /#include <initguid.h>\n#include /m' "$JPM"
+      log "Defining the known-folder GUIDs in java_props_md.c via <initguid.h>"
     fi
 
     OSW="$SRC/src/hotspot/os/windows/os_windows.cpp"
