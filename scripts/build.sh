@@ -215,6 +215,32 @@ case "$PLATFORM" in
       log "Depending on the build JDK's launcher without a .exe suffix"
     fi
 
+    # mingw's SDK headers are all lowercase, while windows code conventionally
+    # writes <Windows.h>, <WinSock2.h>, <Psapi.h> and so on. MSVC never notices,
+    # because NTFS is case-insensitive; here every one of them fails:
+    #   fatal error: 'Windows.h' file not found
+    # 162 files include <Windows.h> alone, so alias rather than edit: collect the
+    # capitalised spellings the sources actually use, symlink each to the real
+    # lowercase header, and put that directory on the include path. The
+    # toolchain's own include dir is root-owned and not ours to write into.
+    CASE_INC="$BUILD_DIR/mingw-case-include"
+    MINGW_INC="$TC/$TARGET/include"
+    if [ -d "$MINGW_INC" ]; then
+      rm -rf "$CASE_INC"; mkdir -p "$CASE_INC"
+      grep -rhoE '#[[:space:]]*include[[:space:]]*<[A-Za-z0-9_]+\.h>' "$SRC/src" 2>/dev/null \
+        | grep -oE '<[A-Za-z0-9_]+\.h>' | tr -d '<>' | sort -u \
+        | while read -r hdr; do
+            low=$(printf '%s' "$hdr" | tr '[:upper:]' '[:lower:]')
+            [ "$hdr" = "$low" ] && continue
+            [ -e "$MINGW_INC/$hdr" ] && continue
+            [ -e "$MINGW_INC/$low" ] || continue
+            ln -sf "$MINGW_INC/$low" "$CASE_INC/$hdr"
+          done
+      log "Aliased $(ls -1 "$CASE_INC" | wc -l) capitalised windows headers"
+      EXTRA_CONF+=(--with-extra-cflags="-I$CASE_INC"
+                   --with-extra-cxxflags="-I$CASE_INC")
+    fi
+
     # The target was being classified as a unix one, so the build pulled in
     # src/java.base/unix/classes and the other unix source roots:
     #   unix/classes/sun/nio/fs/UnixPath.java: error: cannot find symbol
