@@ -215,14 +215,36 @@ case "$PLATFORM" in
       log "Depending on the build JDK's launcher without a .exe suffix"
     fi
 
+    # The target was being classified as a unix one, so the build pulled in
+    # src/java.base/unix/classes and the other unix source roots:
+    #   unix/classes/sun/nio/fs/UnixPath.java: error: cannot find symbol
+    # PLATFORM_EXTRACT_VARS_FROM_OS leaves VAR_OS_TYPE alone in its windows
+    # branches and relies on the caller defaulting OS_TYPE to VAR_OS. But the
+    # build platform is extracted first, and linux sets VAR_OS_TYPE=unix, which
+    # is still set when the target pass runs — so the default never applies and
+    # the target inherits "unix". A windows host never sees this, because there
+    # both passes take the same branch. Set it explicitly.
+    for f in "$SRC/make/autoconf/platform.m4" "$SRC/common/autoconf/platform.m4"; do
+      [ -f "$f" ] || continue
+      grep -q '^      VAR_OS=windows$' "$f" || continue
+      perl -0pi -e 's/^      VAR_OS=windows$/      VAR_OS=windows\n      VAR_OS_TYPE=windows/mg' "$f"
+      log "Classifying the windows target as OS_TYPE=windows, not unix"
+    done
+
     # From here on the problems are hotspot's rather than the build system's.
     #
-    # alloca lives in <malloc.h> on mingw, not <alloca.h>; globalDefinitions_gcc
-    # is written for unix and includes the latter unconditionally.
+    # globalDefinitions_gcc.hpp is the compiler-family header, picked because the
+    # toolchain is clang, and it is written for unix: alloca lives in <malloc.h>
+    # on mingw rather than <alloca.h>, and there is no <dlfcn.h> or <pthread.h>
+    # at all —
+    #   fatal error: 'dlfcn.h' file not found
+    # hotspot reaches dynamic loading and threads through its os layer on
+    # windows, so nothing here needs those two.
     GD="$SRC/src/hotspot/share/utilities/globalDefinitions_gcc.hpp"
     if [ -f "$GD" ] && grep -q '^#include <alloca.h>$' "$GD"; then
       perl -0pi -e 's/^#include <alloca\.h>$/#ifdef __MINGW32__\n#include <malloc.h>\n#else\n#include <alloca.h>\n#endif/m' "$GD"
-      log "Taking alloca from <malloc.h> (mingw has no <alloca.h>)"
+      perl -0pi -e 's/^#include <dlfcn\.h>\n#include <pthread\.h>$/#ifndef __MINGW32__\n#include <dlfcn.h>\n#include <pthread.h>\n#endif/m' "$GD"
+      log "Skipping the unix-only headers in globalDefinitions_gcc.hpp"
     fi
 
     # hotspot poisons sprintf/vsprintf/vsnprintf by redeclaring them extern "C".
