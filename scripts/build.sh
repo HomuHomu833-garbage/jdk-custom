@@ -438,6 +438,32 @@ EOF
       log "Skipping the dumpbin-generated jvm.dll export file"
     fi
 
+    # The per-library makefiles spell their windows compiler flags in MSVC's
+    # dialect, keyed on the target OS rather than the toolchain:
+    #   AwtLibraries.gmk: CFLAGS_windows := -EHsc ...
+    #   clang: error: unknown argument: '-EHsc'
+    # These are switches with no cl.exe-independent meaning at all, so there is
+    # nothing to translate -- clang's defaults already match what each one asks
+    # for (exceptions on for C++, UTF-8 sources, no banner). Strip the ones that
+    # are unambiguously MSVC-only, in one pass over the makefiles, rather than
+    # meeting them one build failure at a time. Deliberately absent: -MD and
+    # -MT, which name a runtime library to cl.exe but dependency generation to
+    # clang -- removing those would be a silent behaviour change, not a no-op.
+    MSVC_ONLY='EHsc|EHa|wd[0-9]+|Zc:[^ )]+|permissive-|utf-8|nologo|guard:cf|FS|GS|Gy|GR|Oy-'
+    if [ -d "$SRC/make" ]; then
+      msvc_files=$(grep -rlE "(^|[[:space:]])-($MSVC_ONLY)([[:space:]]|$)" \
+                     --include='*.gmk' "$SRC/make" 2>/dev/null || true)
+      if [ -n "$msvc_files" ]; then
+        # Twice: a removed flag takes its trailing space with it, so adjacent
+        # flags (-EHsc -wd4244) are not both seen in a single pass.
+        for _ in 1 2; do
+          printf '%s\n' "$msvc_files" | xargs sed -E -i \
+            "s/(^|[[:space:]])-($MSVC_ONLY)([[:space:]]|$)/\\1\\3/g"
+        done
+        log "Dropped MSVC-only compiler flags from $(printf '%s\n' "$msvc_files" | wc -l) makefiles"
+      fi
+    fi
+
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
     #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
