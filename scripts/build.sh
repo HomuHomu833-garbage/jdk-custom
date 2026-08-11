@@ -631,7 +631,6 @@ common_conf=(
   --with-debug-level=release
   --with-native-debug-symbols=none
   --disable-warnings-as-errors
-  --enable-headless-only
   --with-toolchain-type=clang
   BUILD_CC=clang
   BUILD_CXX=clang++
@@ -645,6 +644,16 @@ common_conf=(
   --with-zlib=bundled
   --with-conf-name="$CONF"
 )
+
+# headless-only is a unix idea: it exists to build without X11, and windows and
+# macosx have their toolkits either way, so configure refuses the flag outright
+# ("headless-only is not supported on macOS and Windows"). Ask for it only where
+# it means something — which is also where the missing X11/ALSA sysroots make it
+# necessary.
+case "$TARGET_OS" in
+  windows|macosx) ;;
+  *) common_conf+=(--enable-headless-only) ;;
+esac
 
 # --with-build-user arrived in 17. configure treats unknown options as fatal
 # ("configure: error: unrecognized options: --with-build-user"), so 11 only gets
@@ -675,6 +684,13 @@ if [ "$JDK_VERSION" = 8 ]; then
   # NDK clang as CXX it adds -flimit-debug-info and host g++ refuses it
   # ("g++: error: unrecognized command-line option '-flimit-debug-info'").
   # Building adlc with clang too keeps the flags and the compiler in agreement.
+  # --disable-headful for the same targets as --enable-headless-only above;
+  # windows and macosx build their native toolkits and need no X11.
+  conf8_headful=()
+  case "$TARGET_OS" in
+    windows|macosx) ;;
+    *) conf8_headful=(--disable-headful) ;;
+  esac
   bash ./configure \
     --host="$TARGET" \
     --target="$TARGET" \
@@ -682,11 +698,11 @@ if [ "$JDK_VERSION" = 8 ]; then
     --with-jvm-variants="$JVM_VARIANT" \
     --with-debug-level=release \
     --disable-debug-symbols \
-    --disable-headful \
     --with-freetype=bundled \
     --enable-unlimited-crypto \
     BUILD_CC=clang \
     BUILD_CXX=clang++ \
+    "${conf8_headful[@]}" \
     "${EXTRA_CONF[@]}"
   CONF8="$(ls -d "$SRC"/build/*/ 2>/dev/null | head -n1)"
   IMAGE_DIR="${CONF8%/}/images/j2sdk-image"
