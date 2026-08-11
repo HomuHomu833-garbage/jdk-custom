@@ -244,8 +244,14 @@ case "$PLATFORM" in
       # because a later windows.h in the same translation unit brings it back.
       # MSVC gets away with the same include chain because its windows.h leaves
       # that definition to the COM headers hotspot never asks for.
-      EXTRA_CONF+=(--with-extra-cflags="-I$CASE_INC -DWIN32_LEAN_AND_MEAN"
-                   --with-extra-cxxflags="-I$CASE_INC -DWIN32_LEAN_AND_MEAN")
+      # -fms-extensions: hotspot guards its memory probes with structured
+      # exception handling —
+      #   safefetch_windows.hpp:37: error: use of undeclared identifier '__try'
+      # clang parses __try/__except only with MS extensions enabled. It
+      # implements SEH for x86_64 and aarch64 windows; 32-bit x86 it does not,
+      # so i686 is expected to need a different answer here.
+      EXTRA_CONF+=(--with-extra-cflags="-I$CASE_INC -DWIN32_LEAN_AND_MEAN -fms-extensions"
+                   --with-extra-cxxflags="-I$CASE_INC -DWIN32_LEAN_AND_MEAN -fms-extensions")
     fi
 
     # The target was being classified as a unix one, so the build pulled in
