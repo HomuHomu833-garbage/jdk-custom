@@ -909,7 +909,7 @@ EOF
     for f in $(grep -rl 'fstream' "$SRC/src/jdk.jpackage" 2>/dev/null || true); do
       before=$(grep -c 'c_str()' "$f" || true)
       sed -i -E \
-        -e 's/(std::(i|o)fstream [A-Za-z_][A-Za-z0-9_]*\([A-Za-z_][A-Za-z0-9_]*)\);/\1.c_str());/g' \
+        -e 's/(std::(i|o)?fstream [A-Za-z_][A-Za-z0-9_]*\([A-Za-z_][A-Za-z0-9_]*)([,)])/\1.c_str()\3/g' \
         -e 's/\.open\(([A-Za-z_][A-Za-z0-9_]*)([,)])/.open(\1.c_str()\2/g' \
         "$f"
       after=$(grep -c 'c_str()' "$f" || true)
