@@ -907,6 +907,17 @@ EOF
       log "Opening the stream with a wide c_str() in $(basename "$f")"
     done
 
+    # The same FARPROC conversion hotspot needed, in jpackage:
+    #   WinDll.cpp:67: error: cannot initialize a variable of type 'void *'
+    #   with an rvalue of type 'FARPROC'
+    WDL="$SRC/src/jdk.jpackage/windows/native/common/WinDll.cpp"
+    if [ -f "$WDL" ] && grep -q '^    void \*ptr = GetProcAddress' "$WDL"; then
+      sed -i 's/^\( *\)void \*ptr = \(GetProcAddress(.*)\);$/\1void *ptr = reinterpret_cast<void*>(\2);/' "$WDL"
+      grep -q 'reinterpret_cast<void\*>(GetProcAddress' "$WDL" || {
+        echo "failed to cast the GetProcAddress result in WinDll.cpp" >&2; exit 1; }
+      log "Casting the GetProcAddress result in WinDll.cpp"
+    fi
+
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
     #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
