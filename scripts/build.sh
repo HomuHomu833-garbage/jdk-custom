@@ -482,9 +482,14 @@ EOF
     # nothing to translate -- clang's defaults already match what each one asks
     # for (exceptions on for C++, UTF-8 sources, no banner). Strip the ones that
     # are unambiguously MSVC-only, in one pass over the makefiles, rather than
-    # meeting them one build failure at a time. Deliberately absent: -MD and
-    # -MT, which name a runtime library to cl.exe but dependency generation to
-    # clang -- removing those would be a silent behaviour change, not a no-op.
+    # meeting them one build failure at a time.
+    # -MD and -MT are included after checking every occurrence in make/**/*.gmk:
+    # all of them select a runtime library for cl.exe, none generates
+    # dependencies, which is what left them out before. Leaving -MT in is worse
+    # than removing it -- clang's -MT takes an argument, so
+    #   CXXFLAGS := -MT -DACCESSBRIDGE_ARCH_64
+    # quietly consumed that define rather than failing, and the accessibility
+    # tools have been building without it.
     # A comma ends an argument in these makefiles, so it has to be excluded from
     # -Zc:'s value and accepted as a terminator in its own right. Getting that
     # wrong ate the comma after CXXFLAGS_FILTER_OUT := -Zc:wchar_t-, which
@@ -493,7 +498,7 @@ EOF
     # windows API while passing it wide literals.
     MSVC_ONLY='EHsc|EHa|wd[0-9]+|Zc:[^ ),]+|Z[i7]|permissive-|utf-8|nologo'
     MSVC_ONLY="$MSVC_ONLY|guard:cf|FS|GS|Gy|GR|Gd|Gm-?|Od|Ob[0-9]|Oi|Ot|Oy-?"
-    MSVC_ONLY="$MSVC_ONLY|RTC[1csu]+|MP|W[0-4]|WX-?|analyze-?|sdl-?"
+    MSVC_ONLY="$MSVC_ONLY|RTC[1csu]+|MP|W[0-4]|WX-?|analyze-?|sdl-?|MD|MT"
     if [ -d "$SRC/make" ]; then
       msvc_files=$(grep -rlE "(^|[[:space:]])-($MSVC_ONLY)([[:space:],]|$)" \
                      --include='*.gmk' "$SRC/make" 2>/dev/null || true)
@@ -802,6 +807,46 @@ EOF
       grep -q '^#undef interface$' "$SKT" || {
         echo "failed to undefine the interface macro in socketTransport.c" >&2; exit 1; }
       log "Undefining the interface macro in socketTransport.c"
+    fi
+
+    # libawt uses _bstr_t from comutil.h, whose BSTR functions live in
+    # oleaut32:
+    #   ld.lld: error: undefined symbol: __declspec(dllimport) SysAllocString
+    # MSVC never has to be told, because comutil.h asks for the library with
+    # #pragma comment(lib, "oleaut32.lib") and cl.exe records that in the
+    # object for the linker to act on. clang emits no such directive outside
+    # its MSVC-compatible driver, so name the library where the others are
+    # named.
+    AWL="$SRC/make/modules/java.desktop/lib/AwtLibraries.gmk"
+    if [ -f "$AWL" ] && ! grep -q 'oleaut32.lib' "$AWL"; then
+      sed -i 's/^\( *LIBS_windows := \)advapi32.lib comctl32.lib/\1oleaut32.lib advapi32.lib comctl32.lib/' "$AWL"
+      grep -q 'oleaut32.lib' "$AWL" || {
+        echo "failed to add oleaut32 to the libawt link" >&2; exit 1; }
+      log "Linking libawt against oleaut32 for the BSTR functions"
+    fi
+
+    # jpackage decides between wide and narrow strings on _MSC_VER alone:
+    #   #ifdef _MSC_VER
+    #   #   define TSTRINGS_WITH_WCHAR
+    # so a clang windows build gets tstring = std::string while the windows
+    # sources around it use _T() literals and the W half of the win32 API:
+    #   AppLauncher.cpp:180: error: invalid operands to binary expression
+    #   ('tstring' (aka 'basic_string<char>') and 'const wchar_t[5]')
+    # Widen that one test to the platform. The other _MSC_VER tests in the file
+    # only guard #pragma warning and are left alone.
+    TST="$SRC/src/jdk.jpackage/share/native/common/tstrings.h"
+    if [ -f "$TST" ] && ! grep -q 'defined(_MSC_VER) || defined(_WIN32)' "$TST"; then
+      awk '
+        !done && $0 == "#ifdef _MSC_VER" {
+          print "#if defined(_MSC_VER) || defined(_WIN32)"
+          done = 1
+          next
+        }
+        { print }
+      ' "$TST" > "$TST.tmp" && mv "$TST.tmp" "$TST"
+      grep -q 'defined(_MSC_VER) || defined(_WIN32)' "$TST" || {
+        echo "failed to widen the TSTRINGS_WITH_WCHAR test in tstrings.h" >&2; exit 1; }
+      log "Giving jpackage wide strings on windows, as MSVC gets"
     fi
 
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
