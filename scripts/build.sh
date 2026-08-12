@@ -662,10 +662,16 @@ EOF
     # the JDK compiles C as -std=c11 rather than gnu11. Rather than loosen the
     # language level for the whole build, spell out the definition mingw would
     # have given us -- it is the same __builtin_alloca either way.
+    # It has to be object-like. The call site passes alloca to a macro as a
+    # bare token, and sizecalc.h invokes it as (func)(size); a function-like
+    # macro is not expanded when its name is not followed by a parenthesis, so
+    # the identifier survives to the compiler and is undeclared. Aliasing the
+    # name instead expands in both positions -- which is exactly the form
+    # mingw's own non-GNU branch uses.
     SPL="$SRC/src/java.desktop/windows/native/libsplashscreen/splashscreen_sys.c"
-    if [ -f "$SPL" ] && ! grep -q '^#include <malloc.h>$' "$SPL"; then
-      perl -0pi -e 's/^#include "splashscreen_impl\.h"$/#include <malloc.h>\n#ifndef alloca\n#define alloca(x) __builtin_alloca((x))\n#endif\n#include "splashscreen_impl.h"/m' "$SPL"
-      grep -q '^#define alloca(x) __builtin_alloca((x))$' "$SPL" || {
+    if [ -f "$SPL" ] && ! grep -q '^#define alloca __builtin_alloca$' "$SPL"; then
+      perl -0pi -e 's/^#include "splashscreen_impl\.h"$/#include <malloc.h>\n#undef alloca\n#define alloca __builtin_alloca\n#include "splashscreen_impl.h"/m' "$SPL"
+      grep -q '^#define alloca __builtin_alloca$' "$SPL" || {
         echo "failed to define alloca in splashscreen_sys.c" >&2; exit 1; }
       log "Defining alloca in splashscreen_sys.c"
     fi
@@ -674,13 +680,16 @@ EOF
     # runtime it needs is simply absent:
     #   ld.lld: error: undefined symbol: operator delete(void*)
     #   ld.lld: error: undefined symbol: std::nothrow
-    # SetupNativeCompilation takes that as LINK_TYPE := C++, and sspi_bridge --
-    # one C++ file -- does not say it. Nothing upstream noticed, because the
-    # windows-only C++ libraries have only ever been linked by MSVC, where
-    # link.exe serves both languages and the CRT carries operator new either
-    # way. Rather than name each library as it turns up, infer it: the source
-    # list is known one step later, so decide there, and only when the caller
-    # neither asked for a LINK_TYPE nor named its own linker.
+    # SetupNativeCompilation takes that as LINK_TYPE := C++. sspi_bridge -- one
+    # C++ file -- does not say it, and saproc says LINK_TYPE := C outright for
+    # every OS but linux. Nothing upstream noticed, because the windows-only
+    # C++ libraries have only ever been linked by MSVC, where link.exe serves
+    # both languages and the CRT carries operator new either way. Rather than
+    # name each library as it turns up, infer it from the sources, which are
+    # known one step after the toolchain is set up. C++ sources always win over
+    # a declared C link type -- a C driver cannot link them anywhere, and the
+    # declaration only ever meant "MSVC will sort it out". A caller that named
+    # its own linker is still left alone.
     NCG="$SRC/make/common/NativeCompilation.gmk"
     if [ -f "$NCG" ] && ! grep -q 'INFERRED_LINK_TYPE' "$NCG"; then
       awk '
@@ -688,7 +697,7 @@ EOF
         !done && $0 == "  $$(eval $$(call SetupSourceFiles,$1))" {
           print ""
           print "  # INFERRED_LINK_TYPE: link with the C++ driver when the sources are C++."
-          print "  ifeq ($$($1_LINK_TYPE)$$($1_LD_PROVIDED), )"
+          print "  ifeq ($$($1_LD_PROVIDED), )"
           print "    ifneq ($$(filter %.cpp %.cc %.cxx %.C, $$($1_SRCS)), )"
           print "      $1_LINK_TYPE := C++"
           print "      $1_LD := $$(if $$(filter BUILD, $$($1_TARGET_TYPE)), $$(BUILD_LDCXX), $$(LDCXX))"
