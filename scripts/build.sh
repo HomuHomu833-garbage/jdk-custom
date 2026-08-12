@@ -773,6 +773,37 @@ EOF
       log "Skipping libjsvml on windows (MASM sources); Vector API falls back to Java"
     fi
 
+    # awt.dll carries two different global arrays called StdBlendRules: the
+    # OpenGL pipeline's, in C, and Direct3D's, in C++.
+    #   ld.lld: error: duplicate symbol: StdBlendRules
+    #   >>> defined at D3DContext.obj
+    #   >>> defined at OGLContext.obj
+    # MSVC decorates namespace-scope C++ variables, so the two never meet
+    # there; the Itanium ABI leaves them undecorated and they collide. Rename
+    # the D3D one across its directory rather than making it static, so any
+    # other file in the pipeline that refers to it moves with it.
+    D3D="$SRC/src/java.desktop/windows/native/libawt/java2d/d3d"
+    if [ -d "$D3D" ] && grep -rq '\bStdBlendRules\b' "$D3D"; then
+      grep -rl '\bStdBlendRules\b' "$D3D" | xargs sed -i 's/\bStdBlendRules\b/D3DStdBlendRules/g'
+      log "Renaming the D3D StdBlendRules table so it cannot clash with OpenGL's"
+    fi
+
+    # socketTransport.c names a variable "interface", which is a macro in the
+    # windows SDK -- basetyps.h defines it as struct for COM's benefit:
+    #   socketTransport.c:58: error: declaration of anonymous struct must be a
+    #   definition
+    # WIN32_LEAN_AND_MEAN keeps that out of hotspot's include chain, but this
+    # file reaches it through winsock2.h. Undefining it once works here, unlike
+    # in hotspot, because everything this file includes comes before the
+    # declaration -- there is no later windows.h to bring the macro back.
+    SKT="$SRC/src/jdk.jdwp.agent/share/native/libdt_socket/socketTransport.c"
+    if [ -f "$SKT" ] && ! grep -q '^#undef interface$' "$SKT"; then
+      perl -0pi -e 's/^(static struct jdwpTransportNativeInterface_ interface;)$/#undef interface\n$1/m' "$SKT"
+      grep -q '^#undef interface$' "$SKT" || {
+        echo "failed to undefine the interface macro in socketTransport.c" >&2; exit 1; }
+      log "Undefining the interface macro in socketTransport.c"
+    fi
+
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
     #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
