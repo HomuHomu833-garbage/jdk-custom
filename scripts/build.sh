@@ -901,10 +901,19 @@ EOF
     # const wchar_t* one. Call c_str(), which keeps the path wide -- converting
     # it to a narrow string would hand msvcrt an ANSI-codepage path and lose
     # any character outside it.
-    for f in $(grep -rlE 'std::(i|o)fstream [A-Za-z_][A-Za-z0-9_]*\([A-Za-z_][A-Za-z0-9_]*\);' \
-                 "$SRC/src/jdk.jpackage" 2>/dev/null || true); do
-      sed -i -E 's/(std::(i|o)fstream [A-Za-z_][A-Za-z0-9_]*\([A-Za-z_][A-Za-z0-9_]*)\);/\1.c_str());/g' "$f"
-      log "Opening the stream with a wide c_str() in $(basename "$f")"
+    # Both spellings need it: the constructor and a later open(). Restricted to
+    # files that mention fstream at all, so an unrelated open() elsewhere in
+    # jpackage cannot be caught by the same pattern. Not "#include <fstream>":
+    # WinFileUtils.cpp names std::ifstream but picks the header up indirectly,
+    # and that is the file with the open() call.
+    for f in $(grep -rl 'fstream' "$SRC/src/jdk.jpackage" 2>/dev/null || true); do
+      before=$(grep -c 'c_str()' "$f" || true)
+      sed -i -E \
+        -e 's/(std::(i|o)fstream [A-Za-z_][A-Za-z0-9_]*\([A-Za-z_][A-Za-z0-9_]*)\);/\1.c_str());/g' \
+        -e 's/\.open\(([A-Za-z_][A-Za-z0-9_]*)([,)])/.open(\1.c_str()\2/g' \
+        "$f"
+      after=$(grep -c 'c_str()' "$f" || true)
+      [ "$before" = "$after" ] || log "Opening the stream with a wide c_str() in $(basename "$f")"
     done
 
     # The same FARPROC conversion hotspot needed, in jpackage:
