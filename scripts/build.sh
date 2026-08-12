@@ -941,6 +941,38 @@ EOF
       log "Formatting with the wide CRT function in tstrings.cpp"
     fi
 
+    # jpackage's MSI custom actions export themselves through the linker from
+    # inside the function body:
+    #   __pragma(comment(linker, "/EXPORT:" __FUNCTION__ "=" __FUNCDNAME__));
+    #   error: pragma comment requires parenthesized identifier and optional
+    #   string
+    # __FUNCDNAME__ is the decorated name, and neither it nor a linker comment
+    # of that shape exists outside MSVC. The comment above the macro says what
+    # it is for: registering the CA with the linker so no .def file is needed.
+    # These functions are already extern "C", so __declspec(dllexport) exports
+    # each under the plain name MSI looks up, which is the same outcome. Both
+    # macros get it -- adding it to the definition alone would leave the
+    # declaration in JP_CA_DECLARE disagreeing, which clang rejects once the
+    # earlier one has been used.
+    MCA="$SRC/src/jdk.jpackage/windows/native/common/MsiCA.h"
+    if [ -f "$MCA" ] && grep -q '__FUNCDNAME__' "$MCA"; then
+      awk '
+        index($0, "__pragma(comment(linker, \"/EXPORT:") { next }
+        index($0, "__pragma(comment(linker, \"/INCLUDE:") { next }
+        index($0, "extern \"C\" UINT name(MSIHANDLE hInstall) {") {
+          sub(/extern "C" UINT/, "extern \"C\" __declspec(dllexport) UINT"); print; next
+        }
+        index($0, "extern \"C\" UINT name(MSIHANDLE); \\") {
+          print "    extern \"C\" __declspec(dllexport) UINT name(MSIHANDLE)"; next
+        }
+        { print }
+      ' "$MCA" > "$MCA.tmp" && mv "$MCA.tmp" "$MCA"
+      if grep -q '__FUNCDNAME__' "$MCA"; then
+        echo "failed to replace the linker-comment exports in MsiCA.h" >&2; exit 1
+      fi
+      log "Exporting the MSI custom actions with dllexport instead of a linker comment"
+    fi
+
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
     #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
