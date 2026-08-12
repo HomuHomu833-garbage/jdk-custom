@@ -893,6 +893,20 @@ EOF
       log "Letting SysError take a function pointer for the failing call"
     fi
 
+    # jpackage opens files by handing a tstring -- std::wstring on windows --
+    # straight to std::ifstream:
+    #   PackageFile.cpp:44: error: no matching constructor for initialization
+    #   of 'std::ifstream'
+    # MSVC's STL has a const std::wstring& overload; libc++ has only the
+    # const wchar_t* one. Call c_str(), which keeps the path wide -- converting
+    # it to a narrow string would hand msvcrt an ANSI-codepage path and lose
+    # any character outside it.
+    for f in $(grep -rlE 'std::(i|o)fstream [A-Za-z_][A-Za-z0-9_]*\([A-Za-z_][A-Za-z0-9_]*\);' \
+                 "$SRC/src/jdk.jpackage" 2>/dev/null || true); do
+      sed -i -E 's/(std::(i|o)fstream [A-Za-z_][A-Za-z0-9_]*\([A-Za-z_][A-Za-z0-9_]*)\);/\1.c_str());/g' "$f"
+      log "Opening the stream with a wide c_str() in $(basename "$f")"
+    done
+
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
     #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
