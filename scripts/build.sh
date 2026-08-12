@@ -1021,10 +1021,17 @@ EOF
     # buffer to NewString:
     #   error: cannot initialize a parameter of type 'const jchar *' with an
     #   lvalue of type 'const wchar_t *'
-    if [ -d "$ACC" ] && grep -rq 'NewString(.*wcslen(' "$ACC"; then
-      grep -rl 'NewString(.*wcslen(' "$ACC" | xargs sed -E -i \
-        's/NewString\(([A-Za-z_][A-Za-z0-9_]*), \(jsize\)wcslen\(/NewString((const jchar*)\1, (jsize)wcslen(/g'
-      log "Casting the WCHAR arguments to NewString in the access bridge"
+    # The whole module treats the two as one type: every GetStringChars result
+    # is cast to const wchar_t* on the way in, and handed back to
+    # ReleaseStringChars uncast on the way out. Cast both directions, in every
+    # file, rather than one call per probe -- there are four NewString and
+    # fifteen ReleaseStringChars sites across the two files, two of the latter
+    # inside a macro.
+    if [ -d "$ACC" ] && grep -rq 'NewString(.*wcslen(\|ReleaseStringChars(' "$ACC"; then
+      grep -rl 'NewString(.*wcslen(\|ReleaseStringChars(' "$ACC" | xargs sed -E -i \
+        -e 's/NewString\(([A-Za-z_][A-Za-z0-9_]*), \(jsize\)wcslen\(/NewString((const jchar*)\1, (jsize)wcslen(/g' \
+        -e 's/ReleaseStringChars\(([A-Za-z_][A-Za-z0-9_]*), ([A-Za-z_][A-Za-z0-9_]*)\)/ReleaseStringChars(\1, (const jchar*)\2)/g'
+      log "Casting between WCHAR and jchar at the access bridge's JNI calls"
     fi
 
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
