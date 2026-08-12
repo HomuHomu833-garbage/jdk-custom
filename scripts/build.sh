@@ -927,6 +927,20 @@ EOF
       log "Casting the GetProcAddress result in WinDll.cpp"
     fi
 
+    # tstrings::unsafe_format has an MSVC branch calling the TCHAR-aware
+    # _vsntprintf_s and an everyone-else branch calling narrow vsnprintf. With
+    # tstring now wide, clang takes the second and is handed a wchar_t buffer:
+    #   tstrings.cpp:60: error: no matching function for call to 'vsnprintf'
+    # Pick the wide CRT function on windows. _vsnwprintf returns -1 when the
+    # buffer is too small, which is what the surrounding loop grows on.
+    TSC="$SRC/src/jdk.jpackage/share/native/common/tstrings.cpp"
+    if [ -f "$TSC" ] && ! grep -q '_vsnwprintf' "$TSC"; then
+      perl -0pi -e 's/^(        )(ret = vsnprintf\(&\*fmtout\.begin\(\), fmtout\.size\(\), format, args\);)$/#ifdef _WIN32\n$1ret = _vsnwprintf(&*fmtout.begin(), fmtout.size(), format, args);\n#else\n$1$2\n#endif/m' "$TSC"
+      grep -q '_vsnwprintf' "$TSC" || {
+        echo "failed to use the wide vsnprintf in tstrings.cpp" >&2; exit 1; }
+      log "Formatting with the wide CRT function in tstrings.cpp"
+    fi
+
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
     #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
