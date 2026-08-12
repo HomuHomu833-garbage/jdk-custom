@@ -973,6 +973,29 @@ EOF
       log "Exporting the MSI custom actions with dllexport instead of a linker comment"
     fi
 
+    # The jpackage launchers enter at wmain / wWinMain -- the wide entry
+    # points, which MSVC's CRT selects on its own:
+    #   ld.lld: error: undefined symbol: WinMain
+    #   >>> referenced by crtexewin.c:62  libmingw32.a(crtexewin.o):(main)
+    # Nothing defines main, so the linker pulled in the mingw shim that
+    # provides one and calls WinMain, which nothing defines either. -municode
+    # is how mingw is told to start at the wide entry instead. Console and GUI
+    # variants both get it; each defines exactly one of the two (JP_LAUNCHERW
+    # picks between them), and lld infers the subsystem from which one it is.
+    JPL="$SRC/make/modules/jdk.jpackage/Lib.gmk"
+    if [ -f "$JPL" ] && ! grep -q 'municode' "$JPL"; then
+      awk '
+        { print }
+        /^ *NAME := jpackageapplauncherw?,/ {
+          match($0, /^ */)
+          print substr($0, 1, RLENGTH) "LDFLAGS_windows := -municode, \\"
+        }
+      ' "$JPL" > "$JPL.tmp" && mv "$JPL.tmp" "$JPL"
+      [ "$(grep -c municode "$JPL")" = 2 ] || {
+        echo "expected to add -municode to both jpackage launchers" >&2; exit 1; }
+      log "Starting the jpackage launchers at the wide entry point (-municode)"
+    fi
+
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
     #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
