@@ -996,6 +996,37 @@ EOF
       log "Starting the jpackage launchers at the wide entry point (-municode)"
     fi
 
+    # The access bridge includes one of its own headers by the wrong name:
+    #   JavaAccessBridge.cpp:35: fatal error: 'accessBridgeCallbacks.h' file
+    #   not found
+    # the file is AccessBridgeCallbacks.h. NTFS never noticed; a linux host
+    # does. Same problem as the capitalised windows headers above, except these
+    # are the JDK's own, so alias them where they live. Written as a search
+    # rather than a rename so a header that really is lowercase --
+    # accessBridgeResource.h is one -- is left alone.
+    ACC="$SRC/src/jdk.accessibility"
+    if [ -d "$ACC" ]; then
+      grep -rhoE '#[[:space:]]*include[[:space:]]*"[A-Za-z0-9_]+\.h"' "$ACC" 2>/dev/null \
+        | grep -oE '"[A-Za-z0-9_]+\.h"' | tr -d '"' | sort -u \
+        | while read -r hdr; do
+            if find "$ACC" -name "$hdr" | grep -q .; then continue; fi
+            real=$(find "$ACC" -iname "$hdr" | head -1)
+            [ -n "$real" ] || continue
+            ln -s "$(basename "$real")" "$(dirname "$real")/$hdr"
+            log "Aliasing $hdr to $(basename "$real")"
+          done
+    fi
+
+    # And the same jchar/wchar_t split as libsunmscapi, here passing a WCHAR
+    # buffer to NewString:
+    #   error: cannot initialize a parameter of type 'const jchar *' with an
+    #   lvalue of type 'const wchar_t *'
+    if [ -d "$ACC" ] && grep -rq 'NewString(.*wcslen(' "$ACC"; then
+      grep -rl 'NewString(.*wcslen(' "$ACC" | xargs sed -E -i \
+        's/NewString\(([A-Za-z_][A-Za-z0-9_]*), \(jsize\)wcslen\(/NewString((const jchar*)\1, (jsize)wcslen(/g'
+      log "Casting the WCHAR arguments to NewString in the access bridge"
+    fi
+
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
     #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
