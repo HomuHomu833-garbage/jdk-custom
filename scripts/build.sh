@@ -752,6 +752,27 @@ EOF
       log "Casting between WCHAR and jchar in security.cpp"
     fi
 
+    # libjsvml is the SVML vector math library, and its windows sources are
+    # MASM: assembled by ml64.exe upstream, and unparseable to clang's GNU
+    # assembler from the copyright header down --
+    #   jsvml_d_acos_windows_x86.S:25: error: invalid instruction mnemonic
+    #   'questions.'
+    # There are hundreds of these files and no translation worth attempting;
+    # the linux copies of the same routines are separate sources in GNU syntax,
+    # which is why only the windows build hits this. Drop the library on
+    # windows and leave linux alone.
+    #
+    # This is a functional reduction, and the only one so far. It is a soft
+    # dependency: VectorMathLibrary loads "jsvml" and falls back to "new Java()"
+    # on any Throwable, so the Vector API keeps working and computes
+    # transcendental vector math in Java rather than through SVML. That is
+    # slower for those operations and correct.
+    VEC="$SRC/make/modules/jdk.incubator.vector/Lib.gmk"
+    if [ -f "$VEC" ] && grep -q 'isTargetOs, linux windows' "$VEC"; then
+      sed -i 's/isTargetOs, linux windows/isTargetOs, linux/' "$VEC"
+      log "Skipping libjsvml on windows (MASM sources); Vector API falls back to Java"
+    fi
+
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
     #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
