@@ -849,6 +849,50 @@ EOF
       log "Giving jpackage wide strings on windows, as MSVC gets"
     fi
 
+    # libsplashscreen's windows config defines INLINE as __inline, where the
+    # unix one defines it as static:
+    #   ld.lld: error: undefined symbol: getRGBA
+    # Those helpers live in a header shared by several files. MSVC's __inline
+    # emits a definition wherever one is needed; C99 inline emits none unless
+    # some translation unit also declares the function extern, and none does,
+    # so every call that was not inlined has nothing to reach. Use the unix
+    # spelling, which is what every other clang build of this library uses.
+    SPC="$SRC/src/java.desktop/windows/native/libsplashscreen/splashscreen_config.h"
+    if [ -f "$SPC" ] && grep -q '^#define INLINE __inline$' "$SPC"; then
+      sed -i 's/^#define INLINE __inline$/#define INLINE static/' "$SPC"
+      log "Defining INLINE as static in libsplashscreen, as the unix config does"
+    fi
+
+    # jpackage reports the win32 function that failed by passing it straight to
+    # SysError, whose parameter is a const void*:
+    #   JP_THROW(SysError("ResumeThread() failed", ResumeThread));
+    #   error: no known conversion from 'DWORD (HANDLE) __attribute__((stdcall))'
+    #   to 'const void *' for 2nd argument
+    # A function pointer does not implicitly convert to void* in standard C++;
+    # MSVC permits it. The address is only used for diagnostics. Add a
+    # forwarding constructor that takes any pointer and does the cast, rather
+    # than editing the call sites -- there are dozens across the windows
+    # sources, and the non-template constructor still wins for the ordinary
+    # data-pointer and nullptr cases.
+    WEH="$SRC/src/jdk.jpackage/windows/native/common/WinErrorHandling.h"
+    if [ -f "$WEH" ] && ! grep -q 'template <class T>' "$WEH"; then
+      awk '
+        { print }
+        !done && index($0, "DWORD errorCode=GetLastError(), const char* label=\"System error\");") {
+          print ""
+          print "    // A function pointer does not convert to const void* implicitly."
+          print "    template <class T>"
+          print "    SysError(const tstrings::any& msg, T* caller,"
+          print "            DWORD errorCode=GetLastError(), const char* label=\"System error\")"
+          print "        : SysError(msg, reinterpret_cast<const void*>(caller), errorCode, label) {}"
+          done = 1
+        }
+      ' "$WEH" > "$WEH.tmp" && mv "$WEH.tmp" "$WEH"
+      grep -q 'template <class T>' "$WEH" || {
+        echo "failed to add the SysError forwarding constructor" >&2; exit 1; }
+      log "Letting SysError take a function pointer for the failing call"
+    fi
+
     # WinNTFileSystem_md.c sets errno = ENOMEM but includes no <errno.h>; MSVC's
     # headers happen to drag it in, mingw's do not:
     #   WinNTFileSystem_md.c:718: error: use of undeclared identifier 'ENOMEM'
