@@ -434,6 +434,59 @@ EOF
       log "Translating foo.lib into -lfoo for the mingw linker (21's makefiles)"
     fi
 
+    # java.base builds; the modules that link against it do not:
+    #   lld: error: unable to find library -ljava
+    # 21's libraries.m4 hands every non-microsoft toolchain
+    #   BASIC_JDKLIB_LIBS="-ljava -ljvm"
+    # which is the unix way of naming those two, keyed on the toolchain when what
+    # it describes is the target: on windows the module makefiles already list
+    # them, as $(WIN_JAVA_LIB) -- a full path to java.lib -- and jvm.lib, so
+    # mingw needs the empty value microsoft gets, not the unix one. 25 dropped
+    # JDKLIB_LIBS entirely.
+    LM4="$SRC/make/autoconf/libraries.m4"
+    if [ -f "$LM4" ] && grep -q '^  if test "x\$TOOLCHAIN_TYPE" != xmicrosoft; then$' "$LM4"; then
+      sed -i 's/^  if test "x\$TOOLCHAIN_TYPE" != xmicrosoft; then$/  if test "x$TOOLCHAIN_TYPE" != xmicrosoft \&\& test "x$OPENJDK_TARGET_OS" != xwindows; then/' "$LM4"
+      grep -q 'test "x\$OPENJDK_TARGET_OS" != xwindows; then' "$LM4" || {
+        echo "failed to drop the unix JDKLIB_LIBS for a windows target" >&2; exit 1; }
+      log "Leaving JDKLIB_LIBS empty on windows, as the microsoft path has it"
+    fi
+
+    # Every library that declares no CXXFLAGS gets the C ones copied verbatim,
+    # and -std=c11 is a C-only flag:
+    #   error: invalid argument '-std=c11' not allowed with 'C++'
+    # on libawt's CmdIDList.cpp. libawt is C everywhere but windows, where half
+    # of it is C++, and it names only CFLAGS -- which upstream gets away with
+    # because cl.exe ignores -std:c11 on a C++ file rather than refusing it, and
+    # because a unix library with C++ sources always sets CXXFLAGS or gcc would
+    # have failed the same way. Swap the language standard as the flags are
+    # copied, to the same C++ level 21 asks for elsewhere (LANGSTD_CXXFLAGS is
+    # -std=c++14 there), rather than editing each library that has this shape.
+    if [ -f "$NC" ] && grep -q '^    \$1_CXXFLAGS := \$\$(\$1_CFLAGS)$' "$NC"; then
+      awk '
+        $0 == "    $1_CXXFLAGS := $$($1_CFLAGS)" {
+          print
+          print "    # -std=c11 is C-only; clang refuses it on C++ sources, and a"
+          print "    # windows-only C++ library declares CFLAGS alone because cl.exe"
+          print "    # accepts the C standard flag there and ignores it."
+          print "    ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
+          print "      $1_CXXFLAGS := $$(patsubst -std=c11,-std=c++14,$$($1_CXXFLAGS))"
+          print "    endif"
+          next
+        }
+        $0 == "    $1_EXTRA_CXXFLAGS := $$($1_EXTRA_CFLAGS)" {
+          print
+          print "    ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
+          print "      $1_EXTRA_CXXFLAGS := $$(patsubst -std=c11,-std=c++14,$$($1_EXTRA_CXXFLAGS))"
+          print "    endif"
+          next
+        }
+        { print }
+      ' "$NC" > "$NC.tmp" && mv "$NC.tmp" "$NC"
+      grep -q 'patsubst -std=c11,-std=c++14' "$NC" || {
+        echo "failed to swap the C standard flag for C++ sources in NativeCompilation.gmk" >&2; exit 1; }
+      log "Compiling C++ sources with the C++ standard when a library names only CFLAGS"
+    fi
+
     # The translated names then have to match a file. MSVC resolves library
     # names case-insensitively on a case-insensitive filesystem; mingw ships
     # libmswsock.a and the build host is linux, so a capitalised name finds
