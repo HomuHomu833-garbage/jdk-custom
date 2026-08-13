@@ -474,6 +474,45 @@ EOF
       log "Skipping the dumpbin-generated jvm.dll export file"
     fi
 
+    # 21 reaches dumpbin by the other road. 25 deleted make/hotspot/lib/JvmMapfile.gmk
+    # outright, but on 21 it still builds an EXPORTS mapfile for windows out of
+    #   DUMP_SYMBOLS_CMD := $(DUMPBIN) -symbols *$(OBJ_SUFFIX)
+    # and CompileJvm.gmk hands it to the link as MAPFILE, which becomes -def::
+    #   JvmMapfile.gmk:133: [.../symbols-objects] Error 127
+    # Same reasoning as the block above, so take the same reduction rather than
+    # reimplementing the symbol dump on llvm-nm: the mapfile's contents are
+    # vftable symbols for debugging tools, and mingw exports the JNI entry points
+    # from __declspec(dllexport) on its own.
+    # The whole file exists only to produce JVM_MAPFILE — nothing else consumes
+    # its targets — so emptying that variable and skipping the include removes
+    # the dumpbin call and leaves no rule with an empty target behind. Keyed on
+    # the DUMPBIN branch actually being there, which is what 25 lacks.
+    JMF="$SRC/make/hotspot/lib/JvmMapfile.gmk"
+    if [ -f "$CJ" ] && [ -f "$JMF" ] && grep -q 'DUMP_SYMBOLS_CMD := \$(DUMPBIN)' "$JMF"; then
+      awk '
+        $0 == "JVM_MAPFILE := $(JVM_OUTPUTDIR)/mapfile" {
+          print
+          print "ifeq ($(OPENJDK_TARGET_OS), windows)"
+          print "  ifneq ($(TOOLCHAIN_TYPE), microsoft)"
+          print "    # The windows mapfile is dumpbin output; mingw exports from dllexport."
+          print "    JVM_MAPFILE :="
+          print "  endif"
+          print "endif"
+          next
+        }
+        $0 == "include lib/JvmMapfile.gmk" {
+          print "ifneq ($(JVM_MAPFILE), )"
+          print "  include lib/JvmMapfile.gmk"
+          print "endif"
+          next
+        }
+        { print }
+      ' "$CJ" > "$CJ.tmp" && mv "$CJ.tmp" "$CJ"
+      grep -q '^    JVM_MAPFILE :=$' "$CJ" && grep -q '^ifneq (\$(JVM_MAPFILE), )$' "$CJ" || {
+        echo "failed to skip the dumpbin mapfile in CompileJvm.gmk" >&2; exit 1; }
+      log "Skipping the dumpbin-generated jvm.dll mapfile"
+    fi
+
     # The per-library makefiles spell their windows compiler flags in MSVC's
     # dialect, keyed on the target OS rather than the toolchain:
     #   AwtLibraries.gmk: CFLAGS_windows := -EHsc ...
