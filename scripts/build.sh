@@ -407,8 +407,14 @@ EOF
           print ""
           print "  # mingw wants -lfoo where MSVC wants foo.lib."
           print "  ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
-          print "    $1_LIBS := $$(patsubst %.lib,-l%,$$($1_LIBS))"
-          print "    $1_EXTRA_LIBS := $$(patsubst %.lib,-l%,$$($1_EXTRA_LIBS))"
+          print "    # Only the bare names. 21 also lists inter-module dependencies as"
+          print "    # whole paths -- FindStaticLib spells libjava as"
+          print "    # $(SUPPORT_OUTPUTDIR)/native/java.base/libjava/java.lib -- and"
+          print "    # -l<absolute path> is not a name lld can look up. Those entries are"
+          print "    # the import library another module already built, so let clang link"
+          print "    # the file directly, which is what MSVC is handed as well."
+          print "    $1_LIBS := $$(foreach lib,$$($1_LIBS),$$(if $$(findstring /,$$(lib)),$$(lib),$$(patsubst %.lib,-l%,$$(lib))))"
+          print "    $1_EXTRA_LIBS := $$(foreach lib,$$($1_EXTRA_LIBS),$$(if $$(findstring /,$$(lib)),$$(lib),$$(patsubst %.lib,-l%,$$(lib))))"
           print "    # -stack:N is link.exe'\''s spelling of --stack. LDFLAGS_windows"
           print "    # arrives in EXTRA_LDFLAGS, so both have to be translated."
           print "    $1_LDFLAGS := $$(patsubst -stack:%,-Wl$$(COMMA)--stack$$(COMMA)%,$$($1_LDFLAGS))"
@@ -423,7 +429,7 @@ EOF
           done = 1
         }
       ' "$NC" > "$NC.tmp" && mv "$NC.tmp" "$NC"
-      grep -q '^    \$1_LIBS := \$\$(patsubst %.lib,-l%,\$\$(\$1_LIBS))$' "$NC" || {
+      grep -q '^    \$1_LIBS := \$\$(foreach lib,\$\$(\$1_LIBS),' "$NC" || {
         echo "failed to translate foo.lib in NativeCompilation.gmk" >&2; exit 1; }
       log "Translating foo.lib into -lfoo for the mingw linker (21's makefiles)"
     fi
