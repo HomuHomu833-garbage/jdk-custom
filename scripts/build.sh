@@ -434,6 +434,31 @@ EOF
       log "Translating foo.lib into -lfoo for the mingw linker (21's makefiles)"
     fi
 
+    # The translated names then have to match a file. MSVC resolves library
+    # names case-insensitively on a case-insensitive filesystem; mingw ships
+    # libmswsock.a and the build host is linux, so a capitalised name finds
+    # nothing:
+    #   Lib.gmk: LIBS_windows := jvm.lib Mswsock.lib ws2_32.lib
+    #   lld: error: unable to find library -lMswsock
+    # 25 lowercased these upstream (mswsock.lib there); 21 still has Mswsock.lib
+    # in java.base and Secur32.lib twice in java.security.jgss, so sweep the
+    # makefiles once instead of meeting them one link at a time. Only bare names
+    # are touched -- a match must start at the beginning of a line or after
+    # whitespace, which leaves $(SUPPORT_OUTPUTDIR)/.../net.lib and $(WIN_JAVA_LIB)
+    # alone.
+    win_lib_case=0
+    while IFS= read -r f; do
+      grep -qE '(^|[[:space:]])[A-Za-z0-9_]*[A-Z][A-Za-z0-9_]*\.lib' "$f" || continue
+      sed -i -E 's#(^|[[:space:]])([A-Za-z0-9_]*[A-Z][A-Za-z0-9_]*)\.lib#\1\L\2\E.lib#g' "$f"
+      win_lib_case=$((win_lib_case + 1))
+    done < <(find "$SRC/make" -name '*.gmk')
+    if [ "$win_lib_case" -gt 0 ]; then
+      if grep -rqE '(^|[[:space:]])[A-Za-z0-9_]*[A-Z][A-Za-z0-9_]*\.lib' "$SRC/make" --include='*.gmk'; then
+        echo "failed to lowercase every MSVC library name in the makefiles" >&2; exit 1
+      fi
+      log "Lowercasing the MSVC library names in $win_lib_case makefiles"
+    fi
+
     # JdkNativeCompilation.gmk picks the flag spelling for module libraries by
     # OS: -libpath:<dir> and name.lib for windows, -L<dir> and -lname
     # otherwise. lld in GNU mode reads -libpath:... as -l ibpath:...:
