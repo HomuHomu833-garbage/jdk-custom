@@ -752,6 +752,43 @@ EOF
       log "Linking libraries with C++ sources using the C++ driver"
     fi
 
+    # 21's NativeCompilation.gmk emits the windows link flags for anything
+    # whose *target* is windows, including the build tools that run here:
+    #   clang++: error: unknown argument: '-implib:.../adlc.lib'
+    # adlc is a linux executable built with the BUILD toolchain; it has no
+    # business being handed an import library at all. Skip the block for the
+    # BUILD toolchains, and spell the flag by toolchain for the rest.
+    # -manifest:embed goes the same way: it is a link.exe feature with no lld
+    # equivalent, and 25's generic Link.gmk simply has no manifest support, so
+    # gating it here leaves 21 behaving as 25 already does -- executables from
+    # the mingw path carry no embedded manifest.
+    if [ -f "$NCG" ] && grep -q '"-implib:' "$NCG"; then
+      awk '
+        $0 == "    ifeq ($(call isTargetOs, windows), true)" {
+          print "    ifeq ($(call isTargetOs, windows)$$(if $$(filter TOOLCHAIN_BUILD%, $$($1_TOOLCHAIN)),-build), true)"
+          next
+        }
+        index($0, "$1_EXTRA_LDFLAGS += -manifest:embed") {
+          print "        ifeq ($(TOOLCHAIN_TYPE), microsoft)"
+          print "          $1_EXTRA_LDFLAGS += -manifest:embed"
+          print "        endif"
+          next
+        }
+        index($0, "$1_EXTRA_LDFLAGS += \"-implib:$$($1_IMPORT_LIBRARY)\"") {
+          print "      ifeq ($(TOOLCHAIN_TYPE), microsoft)"
+          print "        $1_EXTRA_LDFLAGS += \"-implib:$$($1_IMPORT_LIBRARY)\""
+          print "      else"
+          print "        $1_EXTRA_LDFLAGS += \"-Wl,--out-implib=$$($1_IMPORT_LIBRARY)\""
+          print "      endif"
+          next
+        }
+        { print }
+      ' "$NCG" > "$NCG.tmp" && mv "$NCG.tmp" "$NCG"
+      grep -q 'out-implib' "$NCG" || {
+        echo "failed to translate -implib: in NativeCompilation.gmk" >&2; exit 1; }
+      log "Emitting import libraries the mingw way, and not for the build tools"
+    fi
+
     # mlib_sys.c picks its aligned allocator with #if defined(_MSC_VER), and
     # everything else gets the unix branch:
     #   mlib_sys.c:85: error: call to undeclared function 'memalign'
