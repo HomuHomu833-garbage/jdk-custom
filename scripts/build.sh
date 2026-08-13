@@ -656,18 +656,25 @@ EOF
     # merged that argument with the CXXFLAGS following it -- so jabswitch lost
     # its whole flag list, -DUNICODE included, and picked the ANSI half of every
     # windows API while passing it wide literals.
+    # The flags are matched with either spelling of the switch character. cl.exe
+    # takes - and / alike and the JDK mixes them: 21 writes
+    #   jdk.attach/Lib.gmk: CFLAGS_windows := /Gy
+    # which the dash-only pattern walked straight past, leaving clang to read it
+    # as a filename ("no such file or directory: '/Gy'"). 25 normalised that one
+    # to -Gy. Only whole tokens from the list below are matched, so MakeBase's
+    # "mklink /J" and ordinary absolute paths are not candidates.
     MSVC_ONLY='EHsc|EHa|wd[0-9]+|Zc:[^ ),]+|Z[i7]|permissive-|utf-8|nologo'
     MSVC_ONLY="$MSVC_ONLY|guard:cf|FS|GS|Gy|GR|Gd|Gm-?|Od|Ob[0-9]|Oi|Ot|Oy-?"
     MSVC_ONLY="$MSVC_ONLY|RTC[1csu]+|MP|W[0-4]|WX-?|analyze-?|sdl-?|MD|MT"
     if [ -d "$SRC/make" ]; then
-      msvc_files=$(grep -rlE "(^|[[:space:]])-($MSVC_ONLY)([[:space:],]|$)" \
+      msvc_files=$(grep -rlE "(^|[[:space:]])[-/]($MSVC_ONLY)([[:space:],]|$)" \
                      --include='*.gmk' "$SRC/make" 2>/dev/null || true)
       if [ -n "$msvc_files" ]; then
         # Twice: a removed flag takes its trailing space with it, so adjacent
         # flags (-EHsc -wd4244) are not both seen in a single pass.
         for _ in 1 2; do
           printf '%s\n' "$msvc_files" | xargs sed -E -i \
-            "s/(^|[[:space:]])-($MSVC_ONLY)([[:space:],]|$)/\\1\\3/g"
+            "s/(^|[[:space:]])[-\\/]($MSVC_ONLY)([[:space:],]|$)/\\1\\3/g"
         done
         log "Dropped MSVC-only compiler flags from $(printf '%s\n' "$msvc_files" | wc -l) makefiles"
       fi
