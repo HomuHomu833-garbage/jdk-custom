@@ -1264,6 +1264,23 @@ EOF
       log "Skipping the pre-stdint primitive typedefs on mingw"
     fi
 
+    # Same header, the <math.h> include: mingw follows MSVC in hiding M_PI and
+    # the other math constants behind _USE_MATH_DEFINES, while glibc defines them
+    # unconditionally — so the gcc header never asks for them and 21's parallel GC
+    # does not get them:
+    #   psParallelCompact.cpp:917: error: use of undeclared identifier 'M_PI'
+    # globalDefinitions_visCPP.hpp defines _USE_MATH_DEFINES right before its own
+    # <math.h> for exactly this reason; do the same on mingw. It lands on 25 as
+    # well, where nothing in hotspot uses M_PI any more — it only makes the
+    # constants available, so that is a no-op in effect rather than by guard.
+    if [ -f "$GD" ] && grep -q '^#include <math.h>$' "$GD" &&
+       ! grep -q '_USE_MATH_DEFINES' "$GD"; then
+      perl -0pi -e 's/^#include <math\.h>$/#ifdef __MINGW32__\n\/\/ mingw hides M_PI and friends behind this, as MSVC does; see\n\/\/ globalDefinitions_visCPP.hpp, which defines it for the same reason.\n#define _USE_MATH_DEFINES\n#endif\n#include <math.h>/m' "$GD"
+      grep -q '^#define _USE_MATH_DEFINES$' "$GD" || {
+        echo "failed to define _USE_MATH_DEFINES for mingw in globalDefinitions_gcc.hpp" >&2; exit 1; }
+      log "Asking for the math constants (M_PI) on mingw"
+    fi
+
     # Same header, both LP64 branches: 21 reads _LP64 as "long is 64 bits", which
     # holds for every unix it targets but not for win64, where long stays 32 bits
     # and intptr_t is long long. Two macros come out wrong there, and 25 deleted
