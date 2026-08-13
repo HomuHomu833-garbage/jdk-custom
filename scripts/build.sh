@@ -1264,6 +1264,33 @@ EOF
       log "Skipping the pre-stdint primitive typedefs on mingw"
     fi
 
+    # Same header, both LP64 branches: 21 reads _LP64 as "long is 64 bits", which
+    # holds for every unix it targets but not for win64, where long stays 32 bits
+    # and intptr_t is long long. Two macros come out wrong there, and 25 deleted
+    # both, so this whole block is 21-and-older only.
+    #
+    #   NULL_WORD is 0L under _LP64. LIR_OprFact::intptrConst is overloaded on
+    #   void* and intptr_t; on linux 0L matches intptr_t exactly and wins, on
+    #   mingw it matches neither exactly:
+    #     g1BarrierSetC1.cpp:172: error: call to 'intptrConst' is ambiguous
+    #   The !_LP64 branch right below already spells the portable form, for the
+    #   same reason (macos, where intptr_t is not int32_t) — take that branch.
+    if [ -f "$GD" ] && grep -q '^    #define NULL_WORD  0L$' "$GD"; then
+      perl -0pi -e 's/^  #ifdef _LP64\n    #define NULL_WORD  0L$/  #if defined(_LP64) \&\& !defined(__MINGW32__)\n    #define NULL_WORD  0L/m' "$GD"
+      grep -q '^  #if defined(_LP64) && !defined(__MINGW32__)$' "$GD" || {
+        echo "failed to give mingw the portable NULL_WORD" >&2; exit 1; }
+      log "Taking the intptr_t-cast NULL_WORD on mingw, not 0L"
+    fi
+    #   FORMAT64_MODIFIER is "l" under _LP64 except on apple, so every jlong
+    #   printed through it would go through a 32-bit conversion on win64. mingw
+    #   wants "ll" for the same reason apple does.
+    if [ -f "$GD" ] && grep -q '^# define FORMAT64_MODIFIER "l"$' "$GD"; then
+      perl -0pi -e 's/^# ifdef __APPLE__\n# define FORMAT64_MODIFIER "ll"$/# if defined(__APPLE__) || defined(__MINGW32__)\n# define FORMAT64_MODIFIER "ll"/m' "$GD"
+      grep -q '^# if defined(__APPLE__) || defined(__MINGW32__)$' "$GD" || {
+        echo "failed to give mingw the ll FORMAT64_MODIFIER" >&2; exit 1; }
+      log "Formatting 64-bit values with ll on mingw, as long is 32 bits there"
+    fi
+
     # jni.h reaches jvm_md.h, which includes <windows.h>, which defines
     # "interface" as a macro for struct. hotspot uses it as an ordinary
     # identifier -- opto/type.hpp declares a bool parameter called interface --
