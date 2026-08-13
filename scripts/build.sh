@@ -1225,6 +1225,29 @@ EOF
       log "Giving mingw the linux g_isnan definitions"
     fi
 
+    # Same header, the include block: 21 puts <inttypes.h> inside the
+    # "#if defined(LINUX) || defined(_ALLBSD_SOURCE)" group, so PRIxPTR is never
+    # defined on a windows target -- globalDefinitions.hpp builds PTR_FORMAT and
+    # INTPTR_FORMAT out of it, and every use of either becomes a bare identifier:
+    #   growableArray.hpp:334: error: expected ')'
+    #   array.hpp:152: error: expected ')'
+    # 25 hoisted <inttypes.h> and <stdint.h> out to the top for everyone; give
+    # mingw the same two rather than joining the linux branch, which also pulls
+    # in <ucontext.h> and <sys/time.h> that mingw has no use for.
+    # The test is where the include sits, not whether it is there: on 21 the only
+    # <inttypes.h> is below the "#if defined(LINUX)" line, on 25 it is above it
+    # and this must do nothing.
+    if [ -f "$GD" ] && grep -q '^#include <errno.h>$' "$GD"; then
+      gd_inttypes=$(grep -n '^#include <inttypes.h>$' "$GD" | head -n1 | cut -d: -f1)
+      gd_linux=$(grep -n '^#if defined(LINUX)' "$GD" | head -n1 | cut -d: -f1)
+      if [ -n "$gd_linux" ] && { [ -z "$gd_inttypes" ] || [ "$gd_inttypes" -gt "$gd_linux" ]; }; then
+        perl -0pi -e 's/^#include <errno\.h>$/#include <errno.h>\n\n#ifdef __MINGW32__\n\/\/ 21 includes these only for linux and the BSDs; PRIxPTR, and so PTR_FORMAT,\n\/\/ is needed everywhere.\n#include <stdint.h>\n#include <inttypes.h>\n#endif/m' "$GD"
+        grep -q '^\/\/ is needed everywhere\.$' "$GD" || {
+          echo "failed to add <inttypes.h> for mingw in globalDefinitions_gcc.hpp" >&2; exit 1; }
+        log "Including <inttypes.h> on mingw, for PRIxPTR"
+      fi
+    fi
+
     # Same header again, 21 and older only: everything that is neither linux nor
     # a BSD gets a block of hand-written "compiler-specific primitive types" —
     # uint16_t, uint32_t, uint64_t, intptr_t, uintptr_t — left over from the
