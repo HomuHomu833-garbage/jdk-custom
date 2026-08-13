@@ -695,7 +695,37 @@ EOF
     # a declared C link type -- a C driver cannot link them anywhere, and the
     # declaration only ever meant "MSVC will sort it out". A caller that named
     # its own linker is still left alone.
+    # Two shapes to cover. 25 splits the native makefiles under
+    # make/common/native/ and picks the linker from LINK_TYPE; 21 and older
+    # keep one NativeCompilation.gmk and pick it by naming a whole toolchain
+    # (TOOLCHAIN_LINK_CXX). Same inference either way, expressed twice.
     NCG="$SRC/make/common/NativeCompilation.gmk"
+    if [ -f "$NCG" ] && ! grep -q 'INFERRED_LINK_TYPE' "$NCG" \
+       && ! grep -q 'SetupSourceFiles' "$NCG"; then
+      awk '
+        { print }
+        !done && $0 == "  $1_SRCS += $$($1_EXTRA_FILES)" {
+          print ""
+          print "  # INFERRED_LINK_TYPE: link with the C++ linker when the sources are C++."
+          print "  ifneq ($$(filter %.cpp %.cc %.cxx %.C, $$($1_SRCS)), )"
+          print "    # Only when the caller left the linker at its toolchain default."
+          print "    ifeq ($$($1_LD), $$($$($1_TOOLCHAIN)_LD))"
+          print "      ifeq ($$($1_TOOLCHAIN), TOOLCHAIN_DEFAULT)"
+          print "        $1_LD := $$(LDCXX)"
+          print "      endif"
+          print "      ifeq ($$($1_TOOLCHAIN), TOOLCHAIN_BUILD)"
+          print "        $1_LD := $$(BUILD_LDCXX)"
+          print "      endif"
+          print "    endif"
+          print "  endif"
+          done = 1
+        }
+      ' "$NCG" > "$NCG.tmp" && mv "$NCG.tmp" "$NCG"
+      grep -q 'INFERRED_LINK_TYPE' "$NCG" || {
+        echo "failed to add the C++ link inference to the monolithic NativeCompilation.gmk" >&2
+        exit 1; }
+      log "Linking libraries with C++ sources using the C++ linker"
+    fi
     if [ -f "$NCG" ] && ! grep -q 'INFERRED_LINK_TYPE' "$NCG"; then
       awk '
         { print }

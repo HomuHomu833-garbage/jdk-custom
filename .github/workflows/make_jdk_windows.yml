@@ -20,4 +20,13 @@ jobs:
       platform: windows
       jdk_version: ${{ inputs.jdk_version }}
       # armv7-w64-mingw32, arm64ec-w64-mingw32
-      targets: '["x86_64-w64-mingw32", "aarch64-w64-mingw32", "i686-w64-mingw32"]'
+      #
+      # i686 only up to 21. JDK 25 removed the 32-bit x86 hotspot port (JEP
+      # 503) -- no *_x86_32.* sources remain -- and the fallback does not
+      # exist either: hotspot ships os_cpu/linux_zero and bsd_zero but no
+      # windows_zero, so Zero cannot stand in on windows. There is no i686
+      # windows configuration in 25 to build.
+      targets: >-
+        ${{ inputs.jdk_version == '25'
+            && '["x86_64-w64-mingw32", "aarch64-w64-mingw32"]'
+            || '["x86_64-w64-mingw32", "aarch64-w64-mingw32", "i686-w64-mingw32"]' }}
