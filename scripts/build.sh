@@ -1056,13 +1056,26 @@ EOF
     # object for the linker to act on. clang emits no such directive outside
     # its MSVC-compatible driver, so name the library where the others are
     # named.
-    AWL="$SRC/make/modules/java.desktop/lib/AwtLibraries.gmk"
-    if [ -f "$AWL" ] && ! grep -q 'oleaut32.lib' "$AWL"; then
-      sed -i 's/^\( *LIBS_windows := \)advapi32.lib comctl32.lib/\1oleaut32.lib advapi32.lib comctl32.lib/' "$AWL"
-      grep -q 'oleaut32.lib' "$AWL" || {
-        echo "failed to add oleaut32 to the libawt link" >&2; exit 1; }
+    # Both makefile shapes: 25 keeps libawt in AwtLibraries.gmk with the library
+    # list alphabetised, 21 keeps it in Awt2dLibraries.gmk in a different order,
+    # so matching 25's first two entries silently did nothing on 21. Anchor on
+    # the libawt setup and its own LIBS_windows instead of on the flag order.
+    for AWL in "$SRC/make/modules/java.desktop/lib/AwtLibraries.gmk" \
+               "$SRC/make/modules/java.desktop/lib/Awt2dLibraries.gmk"; do
+      [ -f "$AWL" ] || continue
+      grep -q 'oleaut32.lib' "$AWL" && continue
+      awk '
+        /SetupJdkLibrary, BUILD_LIBAWT,/ { inawt = 1 }
+        inawt && !done && /^ *LIBS_windows := / {
+          sub(/LIBS_windows := /, "LIBS_windows := oleaut32.lib ")
+          done = 1
+        }
+        { print }
+      ' "$AWL" > "$AWL.tmp" && mv "$AWL.tmp" "$AWL"
+      grep -q 'LIBS_windows := oleaut32.lib ' "$AWL" || {
+        echo "failed to add oleaut32 to the libawt link in $(basename "$AWL")" >&2; exit 1; }
       log "Linking libawt against oleaut32 for the BSTR functions"
-    fi
+    done
 
     # jpackage decides between wide and narrow strings on _MSC_VER alone:
     #   #ifdef _MSC_VER
