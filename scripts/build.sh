@@ -391,6 +391,43 @@ EOF
       log "Translating foo.lib into -lfoo for the mingw linker"
     fi
 
+    # Same translation for 21, which has no make/common/native/: the link is set
+    # up inside SetupNativeCompilation in NativeCompilation.gmk instead, so the
+    # block above finds no file and hotspot's own library list reaches clang
+    # untranslated:
+    #   clang: error: no such file or directory: 'kernel32.lib'
+    # The anchor is the end of the LIBS assembly, which is the same point in the
+    # macro that Link.gmk's _STRIPFLAGS line marks on 25 -- after the per-OS and
+    # per-toolchain lists have been folded in, before the link command is built.
+    NC="$SRC/make/common/NativeCompilation.gmk"
+    if [ -f "$NC" ] && grep -q '\$\$(\$1_LIBS_\$(OPENJDK_TARGET_OS)_\$(TOOLCHAIN_TYPE)) \$\$(\$1_LIBS_\$(TOOLCHAIN_TYPE))' "$NC"; then
+      awk '
+        { print }
+        !done && index($0, "$$($1_LIBS_$(OPENJDK_TARGET_OS)_$(TOOLCHAIN_TYPE)) $$($1_LIBS_$(TOOLCHAIN_TYPE))") {
+          print ""
+          print "  # mingw wants -lfoo where MSVC wants foo.lib."
+          print "  ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
+          print "    $1_LIBS := $$(patsubst %.lib,-l%,$$($1_LIBS))"
+          print "    $1_EXTRA_LIBS := $$(patsubst %.lib,-l%,$$($1_EXTRA_LIBS))"
+          print "    # -stack:N is link.exe'\''s spelling of --stack. LDFLAGS_windows"
+          print "    # arrives in EXTRA_LDFLAGS, so both have to be translated."
+          print "    $1_LDFLAGS := $$(patsubst -stack:%,-Wl$$(COMMA)--stack$$(COMMA)%,$$($1_LDFLAGS))"
+          print "    $1_EXTRA_LDFLAGS := $$(patsubst -stack:%,-Wl$$(COMMA)--stack$$(COMMA)%,$$($1_EXTRA_LDFLAGS))"
+          print "    # -libpath:<dir> is link.exe'\''s -L. 25 centralises this in"
+          print "    # JdkNativeCompilation.gmk, which is where the block above patches it;"
+          print "    # 21 has no -libpath: there at all and spells it per library instead,"
+          print "    # so translate it here, wherever it came from."
+          print "    $1_LDFLAGS := $$(patsubst -libpath:%,-L%,$$($1_LDFLAGS))"
+          print "    $1_EXTRA_LDFLAGS := $$(patsubst -libpath:%,-L%,$$($1_EXTRA_LDFLAGS))"
+          print "  endif"
+          done = 1
+        }
+      ' "$NC" > "$NC.tmp" && mv "$NC.tmp" "$NC"
+      grep -q '^    \$1_LIBS := \$\$(patsubst %.lib,-l%,\$\$(\$1_LIBS))$' "$NC" || {
+        echo "failed to translate foo.lib in NativeCompilation.gmk" >&2; exit 1; }
+      log "Translating foo.lib into -lfoo for the mingw linker (21's makefiles)"
+    fi
+
     # JdkNativeCompilation.gmk picks the flag spelling for module libraries by
     # OS: -libpath:<dir> and name.lib for windows, -L<dir> and -lname
     # otherwise. lld in GNU mode reads -libpath:... as -l ibpath:...:
