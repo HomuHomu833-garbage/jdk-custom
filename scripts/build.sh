@@ -1215,9 +1215,30 @@ EOF
     # isnan behaves the same on mingw, so mingw joins the linux branch. Only the
     # #elif is touched — the #if above it pulls in ucontext.h and friends, which
     # mingw genuinely lacks and must keep skipping.
+    # 21 spells that branch without _AIX (aix has its own header there), so the
+    # _AIX half is optional in the pattern; matching only 25's spelling made this
+    # a silent no-op on 21 and left the #error standing.
     if [ -f "$GD" ] && grep -q '^#error "missing platform-specific definition here"$' "$GD"; then
-      perl -0pi -e 's/^#elif defined\(LINUX\) \|\| defined\(_ALLBSD_SOURCE\) \|\| defined\(_AIX\)$/#elif defined(LINUX) || defined(_ALLBSD_SOURCE) || defined(_AIX) || defined(__MINGW32__)/m' "$GD"
+      perl -0pi -e 's/^#elif defined\(LINUX\) \|\| defined\(_ALLBSD_SOURCE\)( \|\| defined\(_AIX\))?$/#elif defined(LINUX) || defined(_ALLBSD_SOURCE)$1 || defined(__MINGW32__)/m' "$GD"
+      grep -q '^#elif defined(LINUX) || defined(_ALLBSD_SOURCE).* || defined(__MINGW32__)$' "$GD" || {
+        echo "failed to give mingw the g_isnan definitions in globalDefinitions_gcc.hpp" >&2; exit 1; }
       log "Giving mingw the linux g_isnan definitions"
+    fi
+
+    # Same header again, 21 and older only: everything that is neither linux nor
+    # a BSD gets a block of hand-written "compiler-specific primitive types" —
+    # uint16_t, uint32_t, uint64_t, intptr_t, uintptr_t — left over from the
+    # Solaris/Studio days, and it assumes ILP32:
+    #   globalDefinitions_gcc.hpp:105: error: typedef redefinition with
+    #   different types ('int' vs 'long long')
+    # against mingw's own corecrt.h. mingw has a complete <stdint.h>, so the
+    # whole block is dead weight there; exclude it the same way linux is. 25
+    # deleted the block outright, so this finds nothing there.
+    if [ -f "$GD" ] && grep -q '^#if !defined(LINUX) && !defined(_ALLBSD_SOURCE)$' "$GD"; then
+      perl -0pi -e 's/^#if !defined\(LINUX\) && !defined\(_ALLBSD_SOURCE\)$/#if !defined(LINUX) \&\& !defined(_ALLBSD_SOURCE) \&\& !defined(__MINGW32__)/m' "$GD"
+      grep -q '^#if !defined(LINUX) && !defined(_ALLBSD_SOURCE) && !defined(__MINGW32__)$' "$GD" || {
+        echo "failed to exclude the legacy primitive typedefs in globalDefinitions_gcc.hpp" >&2; exit 1; }
+      log "Skipping the pre-stdint primitive typedefs on mingw"
     fi
 
     # jni.h reaches jvm_md.h, which includes <windows.h>, which defines
@@ -1743,6 +1764,19 @@ case "$TARGET_OS" in
   windows|macosx) ;;
   *) common_conf+=(--enable-headless-only) ;;
 esac
+
+# 21 and 22 deprecated windows-x86 but still build it, and configure stops on it:
+#   configure: error: The Windows 32-bit x86 port is deprecated and may be
+#   removed in a future release. Use --enable-deprecated-ports=yes to suppress
+#   this error.
+# The option is keyed on the tree actually having PLATFORM_CHECK_DEPRECATION, not
+# on a version number: 17 and older never emit the error and would reject the
+# unknown option, and 25 removed the port along with the check
+# (see the version-conditional target list in make_jdk_windows.yml).
+if [ "$TARGET_OS" = windows ] && [ "${TARGET%%-*}" = i686 ] &&
+   grep -qr 'enable-deprecated-ports' "$SRC/make/autoconf" 2>/dev/null; then
+  common_conf+=(--enable-deprecated-ports=yes)
+fi
 
 # --with-build-user arrived in 17. configure treats unknown options as fatal
 # ("configure: error: unrecognized options: --with-build-user"), so 11 only gets
