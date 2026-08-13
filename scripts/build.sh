@@ -350,6 +350,21 @@ EOF
       # warnings rather than silencing them, so they stay visible in the log.
       WIN_LAX="-Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
       WIN_CFLAGS="-I$CASE_INC $WIN_DEFS -fms-extensions -Wno-nonportable-include-path $WIN_LAX"
+      # 32-bit x86 only: hotspot reaches for SEH -- __try/__except -- in jni.cpp,
+      # os_windows.cpp, os_windows_x86.cpp, safefetch_windows.hpp and
+      # threadCrashProtection_windows.cpp. clang lowers those into MSVC-style
+      # 32-bit SEH, but i686-w64-mingw32 defaults to the DWARF exception model,
+      # whose asm printer never emits the tables the lowering refers to:
+      #   error: assembler label 'L__ehtable$_JNI_CreateJavaVM@12' can not be
+      #   undefined
+      # Ask for the SEH model explicitly so the two halves agree. x86_64 and
+      # aarch64 already default to SEH and build without this, so it is scoped to
+      # the target that needs it rather than applied to all three.
+      # Only SafeFetch and threadCrashProtection genuinely need __try semantics;
+      # if this does not work, they are what stands between 21 and an i686 build.
+      case "$TARGET" in
+        i686-*) WIN_CFLAGS="$WIN_CFLAGS -fseh-exceptions" ;;
+      esac
       EXTRA_CONF+=(--with-extra-cflags="$WIN_CFLAGS"
                    --with-extra-cxxflags="$WIN_CFLAGS")
     fi
