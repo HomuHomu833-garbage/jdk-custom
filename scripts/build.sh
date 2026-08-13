@@ -1272,6 +1272,30 @@ EOF
     # keying both on the alloca include -- as this did -- silently skipped the
     # dlfcn fix there and left the build failing on a header this block exists
     # to remove.
+    # jvm.dll links its MSVC-named libraries now, and stops on hotspot's own
+    # code: the windows halves of ZGC and XGC call XMemory/ZMemory accessors
+    # without including the headers that define them —
+    #   ld.lld: error: undefined symbol: ZMemory::start() const
+    #   >>> referenced by zVirtualMemory_windows.obj:(...PlaceholderCallbacks...)
+    # xVirtualMemory_windows.cpp includes xVirtualMemory.hpp, which reaches
+    # xMemory.hpp for the declarations, but the bodies are inline in
+    # xMemory.inline.hpp and nothing pulls that in. cl.exe hides the omission:
+    # it emits a COMDAT copy of every inline function each TU uses, so the
+    # definition another TU emitted satisfies this reference at link time. clang
+    # inlines them away instead and emits nothing, leaving the call unresolved.
+    # Add the include each file should have had, in hotspot's alphabetical order.
+    # Both files are gone in 25 (ZGC's windows mapper was restructured), so this
+    # is 21's alone.
+    for gc in x z; do
+      XVM="$SRC/src/hotspot/os/windows/gc/$gc/${gc}VirtualMemory_windows.cpp"
+      [ -f "$XVM" ] || continue
+      grep -q "^#include \"gc/$gc/${gc}Memory.inline.hpp\"\$" "$XVM" && continue
+      perl -pi -e "s{^#include \"gc/$gc/${gc}Mapper_windows\\.hpp\"\$}{#include \"gc/$gc/${gc}Mapper_windows.hpp\"\n#include \"gc/$gc/${gc}Memory.inline.hpp\"}m" "$XVM"
+      grep -q "^#include \"gc/$gc/${gc}Memory.inline.hpp\"\$" "$XVM" || {
+        echo "failed to include ${gc}Memory.inline.hpp in ${gc}VirtualMemory_windows.cpp" >&2; exit 1; }
+      log "Including ${gc}Memory.inline.hpp in ${gc}VirtualMemory_windows.cpp"
+    done
+
     GD="$SRC/src/hotspot/share/utilities/globalDefinitions_gcc.hpp"
     if [ -f "$GD" ] && grep -q '^#include <alloca.h>$' "$GD"; then
       perl -0pi -e 's/^#include <alloca\.h>$/#ifdef __MINGW32__\n#include <malloc.h>\n#else\n#include <alloca.h>\n#endif/m' "$GD"
