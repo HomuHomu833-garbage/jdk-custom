@@ -525,8 +525,13 @@ EOF
     # and every build in this repository starts from a fresh tree. Drop the
     # scan; both files it feeds are pulled in with -include, so their absence
     # is already a supported state.
-    CFG="$SRC/make/common/native/CompileFile.gmk"
-    if [ -f "$CFG" ] && grep -q 'Windows RC compiler does not support' "$CFG"; then
+    # 25 keeps this in make/common/native/CompileFile.gmk; 21 and older keep it
+    # in the one NativeCompilation.gmk. The block itself is identical in both,
+    # down to the line it ends on, so look in whichever file has it.
+    for CFG in "$SRC/make/common/native/CompileFile.gmk" \
+               "$SRC/make/common/NativeCompilation.gmk"; do
+      [ -f "$CFG" ] || continue
+      grep -q 'Windows RC compiler does not support' "$CFG" || continue
       awk '
         /# Windows RC compiler does not support -showIncludes/ { drop = 1 }
         drop && /> \$\$\(\$1_RES_DEPS_TARGETS_FILE\)/ { drop = 0; next }
@@ -534,10 +539,10 @@ EOF
         { print }
       ' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
       if grep -q -- '-Fi\$\$(\$1_RES_DEPS_FILE)' "$CFG"; then
-        echo "resource dependency scan still present in CompileFile.gmk" >&2; exit 1
+        echo "resource dependency scan still present in $(basename "$CFG")" >&2; exit 1
       fi
       log "Dropping the CL-based dependency scan for windows resource files"
-    fi
+    done
 
     # libawt's alloc.h declares its own std::bad_alloc rather than including
     # <new>, to keep awt.dll from depending on msvcp50.dll -- a saving the
@@ -1187,11 +1192,20 @@ EOF
     #   fatal error: 'dlfcn.h' file not found
     # hotspot reaches dynamic loading and threads through its os layer on
     # windows, so nothing here needs those two.
+    # Guarded separately: 21 includes dlfcn.h and pthread.h but no alloca.h, so
+    # keying both on the alloca include -- as this did -- silently skipped the
+    # dlfcn fix there and left the build failing on a header this block exists
+    # to remove.
     GD="$SRC/src/hotspot/share/utilities/globalDefinitions_gcc.hpp"
     if [ -f "$GD" ] && grep -q '^#include <alloca.h>$' "$GD"; then
       perl -0pi -e 's/^#include <alloca\.h>$/#ifdef __MINGW32__\n#include <malloc.h>\n#else\n#include <alloca.h>\n#endif/m' "$GD"
+      log "Taking alloca from <malloc.h> in globalDefinitions_gcc.hpp"
+    fi
+    if [ -f "$GD" ] && grep -q '^#include <dlfcn.h>$' "$GD"; then
       perl -0pi -e 's/^#include <dlfcn\.h>\n#include <pthread\.h>$/#ifndef __MINGW32__\n#include <dlfcn.h>\n#include <pthread.h>\n#endif/m' "$GD"
-      log "Skipping the unix-only headers in globalDefinitions_gcc.hpp"
+      grep -q '^#ifndef __MINGW32__$' "$GD" || {
+        echo "failed to guard the unix-only headers in globalDefinitions_gcc.hpp" >&2; exit 1; }
+      log "Skipping <dlfcn.h> and <pthread.h> in globalDefinitions_gcc.hpp"
     fi
 
     # Same header, further down: g_isnan is defined per platform for apple,
@@ -1241,12 +1255,6 @@ EOF
     #   clang: error: unknown argument: '-showIncludes'
     # The dependency files are only ever -included, so skipping the step costs
     # nothing on a clean build. Keep it for the microsoft toolchain.
-    CFG="$SRC/make/common/native/CompileFile.gmk"
-    if [ -f "$CFG" ] && grep -q 'showIncludes -nologo -TC' "$CFG"; then
-      perl -0pi -e 's/(\n\t\t\$\$\(call ExecuteWithLog, \$\$\(\$1_RES_DEPS_FILE\))/\n        ifeq (\$(TOOLCHAIN_TYPE), microsoft)$1/s' "$CFG"
-      perl -0pi -e 's/(> \$\$\(\$1_RES_DEPS_TARGETS_FILE\)\n)/$1        endif\n/s' "$CFG"
-      log "Skipping the MSVC-only resource dependency scan"
-    fi
     # Fold llvm-mingw's own runtime -- libunwind, libc++, libwinpthread -- into
     # each binary, so the JDK does not need those DLLs shipped beside it. This is
     # as static as Windows gets: the CRT itself (msvcrt/ucrtbase) is an OS
