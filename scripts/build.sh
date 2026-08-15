@@ -1160,6 +1160,44 @@ EOF
       log "Spacing sspi.cpp's PP macro and splitting the declarations its gotos skip"
     fi
 
+    # With TSTRINGS_WITH_WCHAR on -- which the block above turns on for clang --
+    # tstrings::any streams into a wostringstream, and 17 has no overload taking
+    # a narrow string, so "any << lastCRTError()" lands on the generic template.
+    # The only way that compiles is through the any-to-wostream operator further
+    # down the header, which two-phase lookup will not reach:
+    #   tstrings.h:394: error: call to function 'operator<<' that is neither
+    #   visible in the template definition nor found by argument-dependent lookup
+    #   note: 'operator<<' should be declared prior to the call site
+    # 21 added an explicit std::string overload that converts with fromUtf8, so
+    # the template is never instantiated for it. 17 already has the matching
+    # constructor and fromUtf8, so take the overload as 21 writes it -- ahead of
+    # the TSTRINGS_WITH_WCHAR block, so the narrow build gets it too.
+    TST="$SRC/src/jdk.jpackage/share/native/common/tstrings.h"
+    if [ -f "$TST" ] && ! grep -q 'any& operator << (const std::string& msg)' "$TST"; then
+      perl -0777 -i -pe '
+        my $o = qq{        any(const std::string& msg) {\n            data << fromUtf8(msg);\n        }\n\n#ifdef TSTRINGS_WITH_WCHAR\n};
+        my $n = qq{        any(const std::string& msg) {\n            data << fromUtf8(msg);\n        }\n\n        any& operator << (const std::string& msg) {\n            data << fromUtf8(msg);\n            return *this;\n        }\n\n#ifdef TSTRINGS_WITH_WCHAR\n};
+        die "tstrings.h any/ifdef anchor missed\n" unless ($_ =~ s/\Q$o\E/$n/g) == 1;
+      ' "$TST" || { echo "failed to add the narrow-string operator to tstrings.h" >&2; exit 1; }
+      log "Giving jpackage's tstrings::any a narrow std::string overload"
+    fi
+
+    # 17's D3D macros paste adjacent string literals with ##, which is not a
+    # valid preprocessing token and only survives because MSVC allows it:
+    #   D3DBlitLoops.cpp:147: error: pasting formed '" failed in "__FILE__",
+    #   return;"', an invalid preprocessing token
+    # Every ## in the header joins string literals -- the neighbouring # that
+    # stringifies a macro argument is a different operator and stays. 21 removed
+    # them all, leaving plain literal concatenation, so do the same.
+    D3DP="$SRC/src/java.desktop/windows/native/libawt/java2d/d3d/D3DPipeline.h"
+    if [ -f "$D3DP" ] && grep -q ' ## ' "$D3DP"; then
+      d3d_pastes=$(grep -c ' ## ' "$D3DP")
+      sed -i 's/ ## / /g' "$D3DP"
+      grep -q ' ## ' "$D3DP" && {
+        echo "failed to drop the string-literal pastes in D3DPipeline.h" >&2; exit 1; }
+      log "Concatenating rather than pasting the D3D trace literals ($d3d_pastes macros)"
+    fi
+
     # libjsvml is the SVML vector math library, and its windows sources are
     # MASM: assembled by ml64.exe upstream, and unparseable to clang's GNU
     # assembler from the copyright header down --
