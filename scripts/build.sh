@@ -1015,6 +1015,24 @@ EOF
       log "Casting between WCHAR and jchar in security.cpp"
     fi
 
+    # 17 and earlier keep VS2008/VS2012 fallbacks in the unwind headers, behind
+    # "#if _MSC_VER < 1700". clang does not define _MSC_VER at all, so the guard
+    # reads 0 < 1700, the fallbacks compile, and they collide with what
+    # mingw-w64's winnt.h already declares:
+    #   unwind_windows_x86.hpp:70: error: redefinition of '_DISPATCHER_CONTEXT'
+    #   unwind_windows_aarch64.hpp:86: error: typedef redefinition with
+    #   different types ('struct _DISPATCHER_CONTEXT' vs 'DISPATCHER_CONTEXT_ARM64')
+    # 21 deleted the blocks outright, which is why it builds untouched. Here,
+    # just require _MSC_VER to actually exist before honouring the version test.
+    for UNW in "$SRC/src/hotspot/os_cpu/windows_x86/unwind_windows_x86.hpp" \
+               "$SRC/src/hotspot/os_cpu/windows_aarch64/unwind_windows_aarch64.hpp"; do
+      [ -f "$UNW" ] && grep -q '^#if _MSC_VER < ' "$UNW" || continue
+      sed -i 's/^#if _MSC_VER < \([0-9]*\)$/#if defined(_MSC_VER) \&\& _MSC_VER < \1/' "$UNW"
+      grep -q '^#if _MSC_VER < ' "$UNW" && {
+        echo "failed to guard the _MSC_VER fallbacks in $(basename "$UNW")" >&2; exit 1; }
+      log "Requiring _MSC_VER in $(basename "$UNW")'s legacy guards"
+    done
+
     # libjsvml is the SVML vector math library, and its windows sources are
     # MASM: assembled by ml64.exe upstream, and unparseable to clang's GNU
     # assembler from the copyright header down --
