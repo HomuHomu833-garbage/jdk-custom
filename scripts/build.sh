@@ -1057,6 +1057,24 @@ EOF
       log "Zeroing symbolengine.cpp's buffer with 0 rather than a char literal"
     fi
 
+    # topLevelExceptionFilter default-constructs a frame ("frame fr;"), but
+    # frame::frame() is an inline living in the cpu's frame_<cpu>.inline.hpp, and
+    # 17's os_windows.cpp never reaches it -- no include of runtime/frame.inline.hpp
+    # and no transitive path to it -- so nothing emits the body:
+    #   ld.lld: error: undefined symbol: frame::frame()
+    #   >>> referenced by os_windows.obj:(topLevelExceptionFilter(...))
+    # runtime/frame.inline.hpp pulls in CPU_HEADER_INLINE(frame), which is where
+    # the definition is. 21 reaches it another way and links untouched, so key
+    # this on runtime/thread.inline.hpp, which 21 replaced with javaThread.hpp.
+    OSW="$SRC/src/hotspot/os/windows/os_windows.cpp"
+    if [ -f "$OSW" ] && grep -q '#include "runtime/thread.inline.hpp"' "$OSW" &&
+       ! grep -q '#include "runtime/frame.inline.hpp"' "$OSW"; then
+      sed -i '0,\|#include "runtime/globals.hpp"|s||#include "runtime/frame.inline.hpp"\n&|' "$OSW"
+      grep -q '#include "runtime/frame.inline.hpp"' "$OSW" || {
+        echo "failed to include frame.inline.hpp in os_windows.cpp" >&2; exit 1; }
+      log "Including frame.inline.hpp in os_windows.cpp for frame::frame()"
+    fi
+
     # libjsvml is the SVML vector math library, and its windows sources are
     # MASM: assembled by ml64.exe upstream, and unparseable to clang's GNU
     # assembler from the copyright header down --
