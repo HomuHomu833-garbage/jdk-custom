@@ -406,19 +406,26 @@ EOF
       log "Translating foo.lib into -lfoo for the mingw linker"
     fi
 
-    # Same translation for 21, which has no make/common/native/: the link is set
-    # up inside SetupNativeCompilation in NativeCompilation.gmk instead, so the
-    # block above finds no file and hotspot's own library list reaches clang
+    # Same translation for 17 and 21, which have no make/common/native/: the link
+    # is set up inside SetupNativeCompilation in NativeCompilation.gmk instead, so
+    # the block above finds no file and hotspot's own library list reaches clang
     # untranslated:
     #   clang: error: no such file or directory: 'kernel32.lib'
     # The anchor is the end of the LIBS assembly, which is the same point in the
     # macro that Link.gmk's _STRIPFLAGS line marks on 25 -- after the per-OS and
     # per-toolchain lists have been folded in, before the link command is built.
+    # 21 spells that assembly over two lines, the second folding in the
+    # _$(TOOLCHAIN_TYPE) variants; 17 has no such variants and stops at the
+    # per-OS line. Match whichever line ends the statement -- the one naming
+    # _LIBS_$(OPENJDK_TARGET_OS that does not continue onto the next -- so the
+    # block lands after the whole list either way, and after the EXTRA_LDFLAGS
+    # assembly that both versions put immediately above it.
     NC="$SRC/make/common/NativeCompilation.gmk"
-    if [ -f "$NC" ] && grep -q '\$\$(\$1_LIBS_\$(OPENJDK_TARGET_OS)_\$(TOOLCHAIN_TYPE)) \$\$(\$1_LIBS_\$(TOOLCHAIN_TYPE))' "$NC"; then
+    if [ -f "$NC" ] && grep -q '\$1_EXTRA_LIBS += \$\$(\$1_LIBS_\$(OPENJDK_TARGET_OS_TYPE))' "$NC" &&
+       ! grep -q 'mingw wants -lfoo' "$NC"; then
       awk '
         { print }
-        !done && index($0, "$$($1_LIBS_$(OPENJDK_TARGET_OS)_$(TOOLCHAIN_TYPE)) $$($1_LIBS_$(TOOLCHAIN_TYPE))") {
+        !done && index($0, "_LIBS_$(OPENJDK_TARGET_OS") && substr($0, length($0)) != "\\" {
           print ""
           print "  # mingw wants -lfoo where MSVC wants foo.lib."
           print "  ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
@@ -446,7 +453,7 @@ EOF
       ' "$NC" > "$NC.tmp" && mv "$NC.tmp" "$NC"
       grep -q '^    \$1_LIBS := \$\$(foreach lib,\$\$(\$1_LIBS),' "$NC" || {
         echo "failed to translate foo.lib in NativeCompilation.gmk" >&2; exit 1; }
-      log "Translating foo.lib into -lfoo for the mingw linker (21's makefiles)"
+      log "Translating foo.lib into -lfoo for the mingw linker (17/21 makefiles)"
     fi
 
     # java.base builds; the modules that link against it do not:
