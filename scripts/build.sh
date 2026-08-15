@@ -1198,6 +1198,51 @@ EOF
       log "Concatenating rather than pasting the D3D trace literals ($d3d_pastes macros)"
     fi
 
+    # libawt has the same shape sspi.cpp did: JNI_CHECK_PEER_GOTO and friends
+    # jump to a label further down, and C++ will not let that skip a variable's
+    # initialisation, where MSVC only warns:
+    #   awt_Canvas.cpp:215: error: cannot jump from this goto statement to its
+    #   label
+    #   note: jump bypasses variable initialization
+    #     217 |     AwtCanvas *c = (AwtCanvas*)pData;
+    # 21 rewrote this function to drop the macro entirely; splitting the
+    # declaration from the assignment fixes the compile without touching the
+    # control flow, which is what it did for sspi.cpp too.
+    #
+    # awt_Canvas is the one the compiler named. The other three are the same
+    # construct -- a declaration with an initialiser standing after a _GOTO
+    # macro -- found by reading the sources rather than by a build. Splitting a
+    # pointer or handle declaration is semantics-neutral whether or not a goto
+    # actually crosses it, so they are done here rather than one 9-minute build
+    # at a time. Each is applied only if its exact text is present; the
+    # awt_Canvas one is required, since that is the failure in hand.
+    awt_goto_splits=0
+    while IFS='|' read -r rel decl; do
+      [ -n "${rel:-}" ] || continue
+      f="$SRC/src/java.desktop/windows/native/libawt/windows/$rel"
+      [ -f "$f" ] && grep -qF "$decl" "$f" || continue
+      DECL="$decl" perl -0777 -i -pe '
+        my $d = $ENV{DECL};
+        my ($ind, $type, $name, $rhs) =
+          $d =~ /^(\s*)((?:[A-Za-z_][\w:]*\s+|\*\s*)+)(\w+)\s*=\s*(.*;)$/
+          or die "cannot split declaration: $d\n";
+        my $n = "$ind$type$name;\n$ind$name = $rhs";
+        die "declaration not found: $d\n" unless ($_ =~ s/\Q$d\E/$n/g) >= 1;
+      ' "$f" || { echo "failed to split a declaration in $rel" >&2; exit 1; }
+      awt_goto_splits=$((awt_goto_splits + 1))
+      case "$rel" in awt_Canvas.cpp) awt_canvas_split=yes ;; esac
+    done <<'SPLITS'
+awt_Canvas.cpp|    AwtCanvas *c = (AwtCanvas*)pData;
+awt_Component.cpp|        HWND selfWnd = awtComponent->GetHWnd();
+awt_Component.cpp|    AwtComponent *component = (AwtComponent *)pData;
+awt_Dialog.cpp|            HWND oHWnd = awtParent->GetOverriddenHWnd();
+SPLITS
+    if [ "$awt_goto_splits" -gt 0 ]; then
+      [ "${awt_canvas_split:-}" = yes ] || {
+        echo "awt_Canvas.cpp's AwtCanvas *c declaration was not split" >&2; exit 1; }
+      log "Splitting $awt_goto_splits libawt declarations the JNI gotos skip"
+    fi
+
     # libjsvml is the SVML vector math library, and its windows sources are
     # MASM: assembled by ml64.exe upstream, and unparseable to clang's GNU
     # assembler from the copyright header down --
