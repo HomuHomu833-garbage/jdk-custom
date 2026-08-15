@@ -21,12 +21,25 @@ jobs:
       jdk_version: ${{ inputs.jdk_version }}
       # armv7-w64-mingw32, arm64ec-w64-mingw32
       #
-      # i686 only up to 21. JDK 25 removed the 32-bit x86 hotspot port (JEP
-      # 503) -- no *_x86_32.* sources remain -- and the fallback does not
-      # exist either: hotspot ships os_cpu/linux_zero and bsd_zero but no
-      # windows_zero, so Zero cannot stand in on windows. There is no i686
-      # windows configuration in 25 to build.
+      # i686 is dropped for 21 and 25.
+      #
+      # 25 removed the 32-bit x86 hotspot port (JEP 503) -- no *_x86_32.*
+      # sources remain -- and there is no fallback: hotspot ships
+      # os_cpu/linux_zero and bsd_zero but no windows_zero, so Zero cannot
+      # stand in. There is no i686 windows configuration in 25 to build.
+      #
+      # 21 has the port, but not one llvm-mingw can build. Generated code loads
+      # the current thread through the SEH chain -- MacroAssembler::get_thread
+      # in os_cpu/windows_x86/assembler_windows_x86.cpp emits "movl reg, fs:[0];
+      # movl reg, [reg + thread_ptr_offset]" -- and thread_ptr_offset comes from
+      # the MSVC inline asm in os::os_exception_wrapper, valid only because every
+      # java call is nested in its __try block. clang cannot lower 32-bit mingw
+      # SEH: it emits L__ehtable$/$parent_frame_offset labels its asm printer
+      # never defines, and -fseh-exceptions did not change that. Dropping the
+      # __try to satisfy the compiler would remove the very frame get_thread
+      # reads, so the JVM would link and then follow a bogus thread pointer --
+      # the guarding assert is compiled out in release.
       targets: >-
-        ${{ inputs.jdk_version == '25'
+        ${{ (inputs.jdk_version == '21' || inputs.jdk_version == '25')
             && '["x86_64-w64-mingw32", "aarch64-w64-mingw32"]'
             || '["x86_64-w64-mingw32", "aarch64-w64-mingw32", "i686-w64-mingw32"]' }}
