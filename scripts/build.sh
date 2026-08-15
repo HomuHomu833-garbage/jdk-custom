@@ -541,15 +541,19 @@ EOF
     # which lld resolves against mingw's lowercase libmswsock.a:
     #   ld.lld: error: could not open 'libMswsock.a': No such file or directory
     # 21 dropped the pragma and names the library in the makefile instead, where
-    # the sweep above already reaches it. Lowercase these the same way.
+    # the sweep above already reaches it. Lowercase these the same way. The name
+    # is taken whole, between the quotes: the suffix is optional in this pragma
+    # and jpackage writes both spellings -- "Mswsock.lib" in java.base, bare
+    # "Shell32" and "user32" of its own -- so anything narrower rewrites some of
+    # them and leaves the rest to fail at the next link.
     win_pragma_case=0
     while IFS= read -r f; do
-      sed -i -E 's|(pragma comment\(lib, ")([A-Za-z0-9_]+)(\.lib")|\1\L\2\E\3|g' "$f"
+      sed -i -E 's|(pragma comment\(lib, ")([^"]*)(")|\1\L\2\E\3|g' "$f"
       win_pragma_case=$((win_pragma_case + 1))
-    done < <(grep -rlE '#pragma comment\(lib, "[A-Za-z0-9_]*[A-Z]' "$SRC/src" \
+    done < <(grep -rlE '#pragma comment\(lib, "[^"]*[A-Z]' "$SRC/src" \
                --include='*.c' --include='*.cpp' --include='*.h' 2>/dev/null)
     if [ "$win_pragma_case" -gt 0 ]; then
-      grep -rqE '#pragma comment\(lib, "[A-Za-z0-9_]*[A-Z]' "$SRC/src" \
+      grep -rqE '#pragma comment\(lib, "[^"]*[A-Z]' "$SRC/src" \
         --include='*.c' --include='*.cpp' --include='*.h' && {
         echo "failed to lowercase every #pragma comment(lib) name" >&2; exit 1; }
       log "Lowercasing the MSVC library names in $win_pragma_case sources"
