@@ -1075,6 +1075,25 @@ EOF
       log "Including frame.inline.hpp in os_windows.cpp for frame::frame()"
     fi
 
+    # FLAGS_SETUP_ARFLAGS picks the archiver flags by target OS alone, so a
+    # windows target gets lib.exe's spelling whatever the toolchain is:
+    #   ARFLAGS="-nologo -NODEFAULTLIB:MSVCRT"
+    # llvm-ar is not lib.exe and refuses them, which stops the first static
+    # library the build reaches -- 17 still archives fdlibm, 21 converted it to
+    # java and never gets here:
+    #   x86_64-w64-mingw32-ar: error: unknown option n
+    #   CoreLibraries.gmk:44: .../fdlibm.lib] Error 1
+    # AR_OUT_OPTION right above already keys off the toolchain and hands us the
+    # GNU -rcs form, so only the flags are wrong. Require microsoft as well; 25
+    # dropped the windows branch outright and needs nothing.
+    ARF="$SRC/make/autoconf/flags-other.m4"
+    if [ -f "$ARF" ] && grep -q '^  elif test "x\$OPENJDK_TARGET_OS" = xwindows; then$' "$ARF"; then
+      sed -i 's|^  elif test "x\$OPENJDK_TARGET_OS" = xwindows; then$|  elif test "x$OPENJDK_TARGET_OS" = xwindows \&\& test "x$TOOLCHAIN_TYPE" = xmicrosoft; then|' "$ARF"
+      grep -q 'xwindows && test "x\$TOOLCHAIN_TYPE" = xmicrosoft' "$ARF" || {
+        echo "failed to scope the MSVC archiver flags to the microsoft toolchain" >&2; exit 1; }
+      log "Leaving ARFLAGS empty for the mingw archiver"
+    fi
+
     # libjsvml is the SVML vector math library, and its windows sources are
     # MASM: assembled by ml64.exe upstream, and unparseable to clang's GNU
     # assembler from the copyright header down --
