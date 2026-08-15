@@ -487,18 +487,19 @@ EOF
       awk '
         $0 == "    $1_CXXFLAGS := $$($1_CFLAGS)" {
           print
-          print "    # -std=c11 is C-only; clang refuses it on C++ sources, and a"
+          print "    # -std=c99 (17) and -std=c11 (21) are C-only; clang refuses them on"
+          print "    # C++ sources, and a"
           print "    # windows-only C++ library declares CFLAGS alone because cl.exe"
           print "    # accepts the C standard flag there and ignores it."
           print "    ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
-          print "      $1_CXXFLAGS := $$(patsubst -std=c11,-std=c++14,$$($1_CXXFLAGS))"
+          print "      $1_CXXFLAGS := $$(patsubst -std=c11,-std=c++14,$$(patsubst -std=c99,-std=c++14,$$($1_CXXFLAGS)))"
           print "    endif"
           next
         }
         $0 == "    $1_EXTRA_CXXFLAGS := $$($1_EXTRA_CFLAGS)" {
           print
           print "    ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
-          print "      $1_EXTRA_CXXFLAGS := $$(patsubst -std=c11,-std=c++14,$$($1_EXTRA_CXXFLAGS))"
+          print "      $1_EXTRA_CXXFLAGS := $$(patsubst -std=c11,-std=c++14,$$(patsubst -std=c99,-std=c++14,$$($1_EXTRA_CXXFLAGS)))"
           print "    endif"
           next
         }
