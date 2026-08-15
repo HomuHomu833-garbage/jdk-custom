@@ -999,8 +999,12 @@ EOF
     # with "unknown type name 'wchar_t'". Cast at the JNI boundary instead --
     # both types are 16-bit unsigned on windows, which is the assumption the
     # MSVC flag encodes anyway.
+    # Only 21+ needs this: 17 and earlier build the name with NewStringUTF() off
+    # a char*, so there is no wchar_t at the JNI boundary to reconcile. Keying
+    # the guard on the unfixed call keeps it idempotent too -- once cast, the
+    # text reads NewString((const jchar*)pszNameString and no longer matches.
     SEC="$SRC/src/jdk.crypto.mscapi/windows/native/libsunmscapi/security.cpp"
-    if [ -f "$SEC" ] && ! grep -q '(const jchar\*)pszNameString' "$SEC"; then
+    if [ -f "$SEC" ] && grep -q 'env->NewString(pszNameString' "$SEC"; then
       sed -i \
         -e 's/env->NewString(pszNameString, nameLen)/env->NewString((const jchar*)pszNameString, nameLen)/g' \
         -e 's/(pszCertAliasName = env->GetStringChars(jCertAliasName, NULL))/(pszCertAliasName = (const wchar_t*)env->GetStringChars(jCertAliasName, NULL))/g' \
