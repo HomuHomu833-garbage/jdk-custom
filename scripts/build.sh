@@ -1216,31 +1216,57 @@ EOF
     # actually crosses it, so they are done here rather than one 9-minute build
     # at a time. Each is applied only if its exact text is present; the
     # awt_Canvas one is required, since that is the failure in hand.
-    awt_goto_splits=0
-    while IFS='|' read -r rel decl; do
-      [ -n "${rel:-}" ] || continue
-      f="$SRC/src/java.desktop/windows/native/libawt/windows/$rel"
-      [ -f "$f" ] && grep -qF "$decl" "$f" || continue
-      DECL="$decl" perl -0777 -i -pe '
-        my $d = $ENV{DECL};
-        my ($ind, $type, $name, $rhs) =
-          $d =~ /^(\s*)((?:[A-Za-z_][\w:]*\s+|\*\s*)+)(\w+)\s*=\s*(.*;)$/
-          or die "cannot split declaration: $d\n";
-        my $n = "$ind$type$name;\n$ind$name = $rhs";
-        die "declaration not found: $d\n" unless ($_ =~ s/\Q$d\E/$n/g) >= 1;
-      ' "$f" || { echo "failed to split a declaration in $rel" >&2; exit 1; }
-      awt_goto_splits=$((awt_goto_splits + 1))
-      case "$rel" in awt_Canvas.cpp) awt_canvas_split=yes ;; esac
-    done <<'SPLITS'
-awt_Canvas.cpp|    AwtCanvas *c = (AwtCanvas*)pData;
-awt_Component.cpp|        HWND selfWnd = awtComponent->GetHWnd();
-awt_Component.cpp|    AwtComponent *component = (AwtComponent *)pData;
-awt_Dialog.cpp|            HWND oHWnd = awtParent->GetOverriddenHWnd();
-SPLITS
-    if [ "$awt_goto_splits" -gt 0 ]; then
-      [ "${awt_canvas_split:-}" = yes ] || {
-        echo "awt_Canvas.cpp's AwtCanvas *c declaration was not split" >&2; exit 1; }
-      log "Splitting $awt_goto_splits libawt declarations the JNI gotos skip"
+    awt_dir="$SRC/src/java.desktop/windows/native/libawt/windows"
+    if [ -d "$awt_dir" ]; then
+      # Find them rather than meet them one build at a time: walk each file
+      # tracking brace depth and, from a _GOTO macro until its label, report the
+      # declarations-with-initialiser sitting at the goto's own depth. Depth is
+      # what makes this accurate -- a declaration inside a nested block is jumped
+      # over, not into, and is legal. const and static are skipped: one cannot be
+      # separated from its initialiser, the other would change meaning.
+      mkdir -p "$BUILD_DIR"
+      cat > "$BUILD_DIR/awt-goto-scan.awk" <<'AWKEOF'
+FNR == 1 { depth = 0; active = 0 }
+{
+  line = $0
+  gsub(/"[^"]*"/, "", line)
+  gsub(/\047[^\047]*\047/, "", line)
+  opens = gsub(/\{/, "{", line); closes = gsub(/\}/, "}", line)
+  if (active && depth == gotodepth && $0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/) active = 0
+  if (active && depth < gotodepth) active = 0
+  if (active && depth == gotodepth &&
+      $0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_:]*[[:space:]]+\*?[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=]/ &&
+      $0 !~ /^[[:space:]]*(return|delete|if|for|while|else|const|static)\b/)
+    print FILENAME ":" FNR
+  if ($0 ~ /_GOTO\(/) { active = 1; gotodepth = depth }
+  depth += opens - closes
+}
+AWKEOF
+      # Only the type moves to a line of its own; the initialiser stays put, so
+      # a continuation line keeps its place and alignment.
+      cat > "$BUILD_DIR/awt-goto-split.pl" <<'PLEOF'
+if ($. == $ENV{LN}) {
+    if (/^(\s*)((?:[A-Za-z_][\w:]*\s+|\*\s*)+)(\w+)(\s*=.*)$/) {
+        $_ = "$1$2$3;\n$1$3$4\n";
+    } else {
+        die "unexpected declaration shape at $ARGV line $.: $_";
+    }
+}
+PLEOF
+      awt_goto_splits=0
+      # Highest line first, so the line numbers ahead of each edit stay valid.
+      while IFS=: read -r f ln; do
+        [ -n "${ln:-}" ] || continue
+        LN="$ln" perl -i -p "$BUILD_DIR/awt-goto-split.pl" "$f" ||
+          { echo "failed to split $f:$ln" >&2; exit 1; }
+        awt_goto_splits=$((awt_goto_splits + 1))
+      done < <(awk -f "$BUILD_DIR/awt-goto-scan.awk" "$awt_dir"/*.cpp | sort -t: -k1,1 -k2,2nr)
+      if [ "$awt_goto_splits" -gt 0 ]; then
+        awt_left=$(awk -f "$BUILD_DIR/awt-goto-scan.awk" "$awt_dir"/*.cpp | wc -l)
+        [ "$awt_left" -eq 0 ] || {
+          echo "$awt_left libawt declarations still sit under a goto" >&2; exit 1; }
+        log "Splitting $awt_goto_splits libawt declarations the JNI gotos skip"
+      fi
     fi
 
     # libjsvml is the SVML vector math library, and its windows sources are
