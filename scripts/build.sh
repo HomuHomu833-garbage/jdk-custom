@@ -1232,14 +1232,14 @@ FNR == 1 { depth = 0; active = 0 }
   gsub(/"[^"]*"/, "", line)
   gsub(/\047[^\047]*\047/, "", line)
   opens = gsub(/\{/, "{", line); closes = gsub(/\}/, "}", line)
-  if (active && depth == gotodepth && $0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/) active = 0
-  if (active && depth < gotodepth) active = 0
-  if (active && depth == gotodepth &&
+  if (active && depth <= mindepth && $0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/) active = 0
+  if (active && depth == mindepth &&
       $0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_:]*[[:space:]]+\*?[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=]/ &&
       $0 !~ /^[[:space:]]*(return|delete|if|for|while|else|const|static)\b/)
     print FILENAME ":" FNR
-  if ($0 ~ /_GOTO\(/) { active = 1; gotodepth = depth }
+  if ($0 ~ /_GOTO\(/ || $0 ~ /^[[:space:]]*goto[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/) { active = 1; mindepth = depth }
   depth += opens - closes
+  if (active && depth < mindepth) mindepth = depth
 }
 AWKEOF
       # Only the type moves to a line of its own; the initialiser stays put, so
