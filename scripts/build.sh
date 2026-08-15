@@ -1120,6 +1120,46 @@ EOF
       log "Leaving ARFLAGS empty for the mingw archiver"
     fi
 
+    # sspi.cpp is C written as C++, and MSVC lets both of these pass where clang
+    # does not:
+    #   sspi.cpp:58: error: invalid suffix on literal; C++11 requires a space
+    #   between literal and identifier
+    #   sspi.cpp:389: error: cannot jump from this goto statement to its label
+    # The first is "[SSPI:%ld] "fmt"\n" with no spaces around the macro
+    # parameter. The second is C++ refusing to jump into the scope of an
+    # initialised variable: the function's error path gotos hop over five
+    # declarations-with-initialisers, which clang names one by one.
+    #
+    # 21 fixed both, and split exactly those five declarations from their
+    # assignments, so follow it. What is deliberately not taken from 21 is its
+    # accompanying new[]/delete[] to malloc/free rewrite: that is a separate
+    # upstream change, and adopting the allocation half here without its matching
+    # frees would pair malloc with delete[].
+    SSPI="$SRC/src/java.security.jgss/windows/native/libsspi_bridge/sspi.cpp"
+    if [ -f "$SSPI" ] && grep -qF '] "fmt"' "$SSPI"; then
+      perl -0777 -i -pe '
+        my @pairs = (
+          [ qq{] "fmt"}, qq{] " fmt "} ],
+          [ qq{    gss_name_struct* name = new gss_name_struct;},
+            qq{    gss_name_struct* name;\n    name = new gss_name_struct;} ],
+          [ qq{    size_t namelen = wcslen(fullname);},
+            qq{    size_t namelen;\n    namelen = wcslen(fullname);} ],
+          [ qq{    int mechLen = KRB5_OID.length;},
+            qq{    int mechLen;\n    mechLen = KRB5_OID.length;} ],
+          [ qq{    char* buffer = new char[10 + mechLen + len];},
+            qq{    char* buffer;\n    buffer = new char[10 + mechLen + len];} ],
+          [ qq{    int flag = flag_gss_to_sspi(req_flags) | ISC_REQ_ALLOCATE_MEMORY;},
+            qq{    int flag;\n    flag = flag_gss_to_sspi(req_flags) | ISC_REQ_ALLOCATE_MEMORY;} ],
+        );
+        for my $p (@pairs) {
+          my ($o, $n) = @$p;
+          my $c = ($_ =~ s/\Q$o\E/$n/g);
+          die "sspi.cpp anchor missed or ambiguous ($c): $o\n" unless $c == 1;
+        }
+      ' "$SSPI" || { echo "failed to make sspi.cpp compile as C++" >&2; exit 1; }
+      log "Spacing sspi.cpp's PP macro and splitting the declarations its gotos skip"
+    fi
+
     # libjsvml is the SVML vector math library, and its windows sources are
     # MASM: assembled by ml64.exe upstream, and unparseable to clang's GNU
     # assembler from the copyright header down --
