@@ -1269,6 +1269,44 @@ PLEOF
       fi
     fi
 
+    # alloc.h poisons malloc/calloc/realloc so JDK code cannot call them:
+    #   #define malloc Do_Not_Use_malloc_Use_safe_Malloc_Instead
+    # awt_ole.h includes mingw's comdef.h, which includes comip.h, which calls
+    # malloc itself -- so once awt.h has been included first, a system header
+    # inherits the poison and stops the build:
+    #   comip.h:252: error: use of undeclared identifier
+    #   'Do_Not_Use_malloc_Use_safe_Malloc_Instead'
+    # awt_ole.h includes comdef.h before awt.h precisely to avoid this, which
+    # only works if it is reached first. 21 rearranged both DnD files to include
+    # it ahead of anything pulling in awt.h; do the same, keyed on the ordering
+    # rather than on a file list, so a file already in that shape is left alone.
+    mkdir -p "$BUILD_DIR"
+    cat > "$BUILD_DIR/awt-ole-hoist.pl" <<'PLEOF'
+my $inc = "#include \"awt_ole.h\"\n";
+exit 0 unless /\Q$inc\E/;
+my @lines = split /^/, $_;
+my ($ole) = grep { $lines[$_] eq $inc } 0 .. $#lines;
+my ($first) = grep { $lines[$_] =~ /^#include\s+[<"]awt[.\w]*[>"]/ } 0 .. $#lines;
+exit 0 if !defined $ole || !defined $first || $ole <= $first;
+splice(@lines, $ole, 1);
+splice(@lines, $first, 0, $inc);
+$_ = join "", @lines;
+PLEOF
+    awt_ole_hoists=0
+    for f in "$awt_dir"/*.cpp; do
+      [ -f "$f" ] || continue
+      grep -q '#include "awt_ole.h"' "$f" || continue
+      ole=$(grep -n '#include "awt_ole.h"' "$f" | head -1 | cut -d: -f1)
+      first=$(grep -nE '^#include[[:space:]]+[<"]awt[._A-Za-z0-9]*[>"]' "$f" | head -1 | cut -d: -f1)
+      [ -n "${first:-}" ] && [ "$ole" -gt "$first" ] || continue
+      perl -0777 -i -p "$BUILD_DIR/awt-ole-hoist.pl" "$f" ||
+        { echo "failed to hoist awt_ole.h in $(basename "$f")" >&2; exit 1; }
+      awt_ole_hoists=$((awt_ole_hoists + 1))
+    done
+    if [ "$awt_ole_hoists" -gt 0 ]; then
+      log "Including awt_ole.h before awt.h in $awt_ole_hoists sources"
+    fi
+
     # libjsvml is the SVML vector math library, and its windows sources are
     # MASM: assembled by ml64.exe upstream, and unparseable to clang's GNU
     # assembler from the copyright header down --
