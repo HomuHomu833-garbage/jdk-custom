@@ -1033,6 +1033,23 @@ EOF
       log "Requiring _MSC_VER in $(basename "$UNW")'s legacy guards"
     done
 
+    # 17 clears the first slot of symbolengine.cpp's template buffer with a char
+    # literal, "_p[0] = '\0';". The buffer is instantiated for HMODULE too, and
+    # a char is not a null pointer constant, so clang rejects that instantiation
+    # where MSVC waves it through:
+    #   symbolengine.cpp:114: error: incompatible integer to pointer conversion
+    #   assigning to 'HINSTANCE__ *' from 'char'
+    # 21 writes a plain 0 -- still zero for the char case, a null pointer
+    # constant for the pointer one. Adopt that, which makes the file identical
+    # to 21's here.
+    SYE="$SRC/src/hotspot/os/windows/symbolengine.cpp"
+    if [ -f "$SYE" ] && grep -qF "_p[0] = '\\0';" "$SYE"; then
+      sed -i "s/_p\[0\] = '[\\]0';/_p[0] = 0;/g" "$SYE"
+      grep -qF "_p[0] = '\\0';" "$SYE" && {
+        echo "failed to zero symbolengine.cpp's buffer without a char literal" >&2; exit 1; }
+      log "Zeroing symbolengine.cpp's buffer with 0 rather than a char literal"
+    fi
+
     # libjsvml is the SVML vector math library, and its windows sources are
     # MASM: assembled by ml64.exe upstream, and unparseable to clang's GNU
     # assembler from the copyright header down --
