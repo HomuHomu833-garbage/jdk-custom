@@ -534,6 +534,27 @@ EOF
       log "Lowercasing the MSVC library names in $win_lib_case makefiles"
     fi
 
+    # Same casing problem, but coming from the sources rather than the
+    # makefiles. 17 asks for the library from inside the C file:
+    #   FileChannelImpl.c: #pragma comment(lib, "Mswsock.lib")
+    # clang honours that pragma on windows targets and emits a linker request,
+    # which lld resolves against mingw's lowercase libmswsock.a:
+    #   ld.lld: error: could not open 'libMswsock.a': No such file or directory
+    # 21 dropped the pragma and names the library in the makefile instead, where
+    # the sweep above already reaches it. Lowercase these the same way.
+    win_pragma_case=0
+    while IFS= read -r f; do
+      sed -i -E 's|(pragma comment\(lib, ")([A-Za-z0-9_]+)(\.lib")|\1\L\2\E\3|g' "$f"
+      win_pragma_case=$((win_pragma_case + 1))
+    done < <(grep -rlE '#pragma comment\(lib, "[A-Za-z0-9_]*[A-Z]' "$SRC/src" \
+               --include='*.c' --include='*.cpp' --include='*.h' 2>/dev/null)
+    if [ "$win_pragma_case" -gt 0 ]; then
+      grep -rqE '#pragma comment\(lib, "[A-Za-z0-9_]*[A-Z]' "$SRC/src" \
+        --include='*.c' --include='*.cpp' --include='*.h' && {
+        echo "failed to lowercase every #pragma comment(lib) name" >&2; exit 1; }
+      log "Lowercasing the MSVC library names in $win_pragma_case sources"
+    fi
+
     # JdkNativeCompilation.gmk picks the flag spelling for module libraries by
     # OS: -libpath:<dir> and name.lib for windows, -L<dir> and -lname
     # otherwise. lld in GNU mode reads -libpath:... as -l ibpath:...:
