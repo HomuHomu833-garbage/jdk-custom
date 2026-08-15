@@ -1269,6 +1269,31 @@ PLEOF
       fi
     fi
 
+    # One declaration the scan above deliberately will not touch: a const cannot
+    # be separated from its initialiser, so splitting is not available.
+    #   awt_PrintJob.cpp:927: error: cannot jump from this goto statement to its
+    #   label
+    #   note: jump bypasses variable initialization
+    #     935 |     const double epsilon = 0.10;
+    # Move it above the goto instead. It is a literal with nothing to depend on,
+    # and JNI_CHECK_NULL_GOTO is the first jump in that function, so nothing else
+    # crosses it afterwards. 21 has the same constant and does not trip over it
+    # because it replaced that macro with an explicit null check and return.
+    # This is the only qualified declaration in libawt sitting under a goto, so
+    # it is done by name rather than by another scan.
+    PJ="$awt_dir/awt_PrintJob.cpp"
+    pj_eps='    const double epsilon = 0.10;'
+    pj_goto='    JNI_CHECK_NULL_GOTO(printDC, "Invalid printDC", done);'
+    if [ -f "$PJ" ] && grep -qxF "$pj_eps" "$PJ" &&
+       [ "$(grep -nxF "$pj_eps" "$PJ" | cut -d: -f1)" -gt "$(grep -nxF "$pj_goto" "$PJ" | cut -d: -f1)" ]; then
+      EPS="$pj_eps" GOTO="$pj_goto" perl -0777 -i -pe '
+        my ($e, $g) = ($ENV{EPS} . "\n", $ENV{GOTO} . "\n");
+        die "epsilon declaration not unique\n" unless ($_ =~ s/\Q$e\E//) == 1;
+        die "printDC goto not unique\n" unless ($_ =~ s/\Q$g\E/$e$g/) == 1;
+      ' "$PJ" || { echo "failed to hoist epsilon above the goto in awt_PrintJob.cpp" >&2; exit 1; }
+      log "Declaring awt_PrintJob's epsilon before the goto that would skip it"
+    fi
+
     # alloc.h poisons malloc/calloc/realloc so JDK code cannot call them:
     #   #define malloc Do_Not_Use_malloc_Use_safe_Malloc_Instead
     # awt_ole.h includes mingw's comdef.h, which includes comip.h, which calls
