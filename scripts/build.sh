@@ -1294,6 +1294,36 @@ PLEOF
       log "Declaring awt_PrintJob's epsilon before the goto that would skip it"
     fi
 
+    # Three of the access bridge's getters return jobject but hand
+    # EXCEPTION_CHECK -- which expands to a return -- an AccessibleContext, and a
+    # fourth returns one directly. AccessibleContext is a jlong, so that is an
+    # integer where a pointer belongs:
+    #   AccessBridgeJavaEntryPoints.cpp:1044: error: cannot initialize return
+    #   object of type 'jobject' (aka '_jobject *') with an rvalue of type
+    #   'AccessibleContext' (aka 'long long')
+    # 21 wrapped exactly these four in reinterpret_cast<jobject>, which is the
+    # same conversion the rest of the file already makes by hand. Take that,
+    # keyed on each site's own text: the other EXCEPTION_CHECKs passing
+    # (AccessibleContext)0 sit in functions that really do return one, and must
+    # be left alone.
+    ABJ="$SRC/src/jdk.accessibility/windows/native/libjavaaccessbridge/AccessBridgeJavaEntryPoints.cpp"
+    if [ -f "$ABJ" ] && grep -q 'EXCEPTION_CHECK("Getting ParentWithRole - call to CallObjectMethod()", (AccessibleContext)0)' "$ABJ"; then
+      perl -0777 -i -pe '
+        my @sites = (
+          qq{EXCEPTION_CHECK("Getting ParentWithRole - call to CallObjectMethod()", (AccessibleContext)0)},
+          qq{EXCEPTION_CHECK("Getting ParentWithRoleElseRoot - call to CallObjectMethod()", (AccessibleContext)0)},
+          qq{EXCEPTION_CHECK("Getting ActiveDescendent - call to CallObjectMethod()", (AccessibleContext)0)},
+          qq{        return (AccessibleContext)0;\n},
+        );
+        for my $s (@sites) {
+          my $n = $s;
+          $n =~ s/\(AccessibleContext\)0/reinterpret_cast<jobject>((AccessibleContext)0)/;
+          die "access bridge site missed or ambiguous: $s\n" unless ($_ =~ s/\Q$s\E/$n/g) == 1;
+        }
+      ' "$ABJ" || { echo "failed to cast the access bridge jobject returns" >&2; exit 1; }
+      log "Returning jobject rather than AccessibleContext at 4 access bridge sites"
+    fi
+
     # alloc.h poisons malloc/calloc/realloc so JDK code cannot call them:
     #   #define malloc Do_Not_Use_malloc_Use_safe_Malloc_Instead
     # awt_ole.h includes mingw's comdef.h, which includes comip.h, which calls
