@@ -1,47 +1,40 @@
 /*
- * MIT License -- see the LICENSE file at the root of this repository.
+ * MIT License; see the LICENSE file at the root of this repository.
  * Copyright (c) 2025-2026 Lily Ross
  *
  * A DirectAudio (javax.sound.sampled PCM) backend for OpenJDK's libjsound,
  * built on miniaudio instead of ALSA.
  *
- * Why: OpenJDK's only unix PCM backend is ALSA, and it needs <alsa/asoundlib.h>
- * at build time and libasound.so.2 at run time. No cross sysroot used by this
- * repository ships either, and bionic devices have no ALSA at all, so those
- * builds shipped with no native sound provider whatsoever. The BSDs are worse
- * still: OpenJDK has no BSD sound sources at all (src/java.desktop/bsd has no
- * native/ directory), so they get the shared DirectAudio layer with nothing
- * underneath it. miniaudio declares the backend symbols itself and resolves
- * whatever the machine actually has at run time -- PulseAudio/ALSA/JACK on
- * linux, sndio/audio(4)/OSS on the BSDs, AAudio/OpenSL ES on android, WASAPI/
- * DirectSound/WinMM on windows, Core Audio on macOS -- so there is no
- * build-time dependency and one implementation covers every target.
+ * Why: OpenJDK's only unix PCM backend is ALSA, which needs <alsa/asoundlib.h>
+ * at build time and libasound.so.2 at run time. No cross sysroot here ships
+ * either, bionic has no ALSA at all, and the BSDs have no OpenJDK sound sources
+ * whatsoever, so all of those shipped with no native provider. miniaudio needs
+ * nothing at build time and picks a backend at run time: PulseAudio/ALSA/JACK on
+ * linux, sndio/audio(4)/OSS on the BSDs, AAudio/OpenSL ES on android,
+ * WASAPI/DirectSound/WinMM on windows, Core Audio on macOS.
  *
- * Scope: this implements DirectAudio (SourceDataLine/TargetDataLine) only, and
- * it is the PCM provider on every platform this repository builds. The ports
- * (mixer control) and MIDI providers have no miniaudio equivalent: on windows
- * and macOS the native ones are kept alongside this file, and on linux, android
- * and the BSDs -- where there is no native implementation to keep -- they are
- * compiled out. See scripts/build.sh.
+ * Scope: DirectAudio (SourceDataLine/TargetDataLine) only, on every platform
+ * this repository builds. Ports (mixer control) and MIDI have no miniaudio
+ * equivalent; windows and macOS keep their native ones alongside this file,
+ * everywhere else they are compiled out. See scripts/build.sh.
  *
- * Model: one mixer, index 0, which is whatever the system calls its default
- * device. Each open line gets its own ma_device plus a single-producer/
- * single-consumer ring buffer, and the device data callback is the other end of
- * that ring buffer. That mirrors how the ALSA backend is driven by the Java
- * layer: DAUDIO_Write/Read move bytes, and position and drain state are derived
- * from how full the buffer is (the same estimate the ALSA backend makes in
+ * Model: one mixer, index 0, the system default device. Each open line gets its
+ * own ma_device plus a single-producer/single-consumer ring buffer, with the
+ * device data callback on the other end. That mirrors how the Java layer drives
+ * the ALSA backend: DAUDIO_Write/Read move bytes, and position and drain state
+ * follow from how full the buffer is (the estimate ALSA makes in
  * estimatePositionFromAvail).
  *
- * This file is copied into the JDK source tree by scripts/build.sh, next to a
- * pinned miniaudio.h, and is compiled as part of libjsound (GPLv2 with the
- * Classpath Exception). MIT is compatible with that.
+ * scripts/build.sh copies this into the JDK source tree next to a pinned
+ * miniaudio.h, to be compiled as part of libjsound (GPLv2 with the Classpath
+ * Exception). MIT is compatible with that.
  */
 
 /*
- * Pull in the miniaudio implementation here: this is the only translation unit
- * that uses it. Everything above device I/O -- decoding, the resource manager,
- * the node graph, the high level engine -- is switched off; we only ever need a
- * raw device and a ring buffer, and leaving the rest out keeps libjsound small.
+ * The miniaudio implementation lands here, the only translation unit that uses
+ * it. Everything above device I/O (decoding, resource manager, node graph, the
+ * high level engine) is off; a raw device and a ring buffer is all we need, and
+ * leaving the rest out keeps libjsound small.
  */
 #define MINIAUDIO_IMPLEMENTATION
 #define MA_NO_DECODING
@@ -108,12 +101,10 @@ static ma_context     theContext;
 static int            theContextState = 0;
 
 /*
- * The one lock this file needs guards that lazily created context, so it has to
- * be usable from a static initialiser -- there is no init hook to run first.
- * POSIX has PTHREAD_MUTEX_INITIALIZER for that and windows has SRWLOCK_INIT;
- * miniaudio's own ma_mutex needs a runtime ma_mutex_init, which is exactly what
- * cannot be arranged here. Both are plain blocking locks, held for the length of
- * one context init.
+ * The one lock here guards that lazily created context, so it must work from a
+ * static initialiser; there is no init hook to run first. POSIX has
+ * PTHREAD_MUTEX_INITIALIZER and windows has SRWLOCK_INIT, while miniaudio's own
+ * ma_mutex needs a runtime ma_mutex_init, which is what cannot be arranged.
  */
 #if defined(_WIN32)
 static SRWLOCK theContextLock = SRWLOCK_INIT;
@@ -382,7 +373,7 @@ int DAUDIO_Stop(void* id, int isSource) {
     }
     if (info->isRunning) {
         /* ma_device_stop waits for the audio thread to go idle, so whatever is
-         * still queued stays queued -- Java expects stop() to pause, not drop. */
+         * still queued stays queued; Java expects stop() to pause, not drop. */
         if (ma_device_stop(&info->device) != MA_SUCCESS) {
             return FALSE;
         }
@@ -510,7 +501,7 @@ int DAUDIO_Flush(void* id, int isSource) {
 
     /* The ring buffer is single producer / single consumer, so resetting it
      * under a live device callback would race. Stop the device first (which
-     * joins the audio thread), reset, then restart if it had been running --
+     * joins the audio thread), reset, then restart if it had been running;
      * the same drop-and-restart the ALSA backend does. */
     wasRunning = info->isRunning;
     if (wasRunning && ma_device_stop(&info->device) != MA_SUCCESS) {

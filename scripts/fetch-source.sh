@@ -2,7 +2,7 @@
 # Thin wrapper: resolve the OpenJDK GA build tag from the Azul Zulu API, fetch
 # that source from the matching openjdk/jdk<N>u repo, download the Azul Zulu JDK
 # we use as the boot + interim build JDK, and apply the global (+ per-patchset)
-# patches. No state file is written — build.sh recomputes the same paths from
+# patches. No state file is written, build.sh recomputes the same paths from
 # $ROOTDIR and reads JDK_VERSION from the env, like the sibling repos.
 #
 #   JDK_VERSION   required feature version: 8 | 11 | 17 | 21 | 25
@@ -43,12 +43,10 @@ BOOT_JDK="${BOOT_JDK:-$ROOTDIR/boot-jdk}"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
-# Download with retries: re-run aria2c on any failure so transient GitHub/Azul
-# 501/504 (and the like) recover, without relying on aria2's --retry-on-unknown
-# (older aria2 builds lack it). Pass aria2c args, e.g. --dir=/tmp -o f.zip URL.
-# --allow-overwrite/--auto-file-renaming: without them a retry parks the second
-# attempt beside the first as NAME.1 and leaves the partial NAME for the unpack
-# to trip over.
+# Download with retries so transient GitHub/Azul 5xx recover; aria2's own
+# --retry-on-unknown is missing from older builds. --allow-overwrite/
+# --auto-file-renaming keep a retry from parking the second attempt beside the
+# first as NAME.1. Pass aria2c args, e.g. --dir=/tmp -o f.zip URL.
 fetch() {
   local i=0
   until aria2c --console-log-level=error --check-certificate=false \
@@ -56,6 +54,39 @@ fetch() {
                --allow-overwrite=true --auto-file-renaming=false "$@"; do
     i=$((i + 1)); [ "$i" -ge 5 ] && { echo "fetch: giving up after $i attempts" >&2; return 1; }
     echo "fetch: aria2c failed, retry $i/5 in 2s..." >&2; sleep 2
+  done
+}
+
+unpack() {
+  local archive="$1" dest="$2"; shift 2
+  case "$archive" in
+    *.tar.gz|*.tgz) tar -xzf "$archive" -C "$dest" "$@" ;;
+    *.tar.xz)       tar -xJf "$archive" -C "$dest" "$@" ;;
+    *.tar.bz2)      tar -xjf "$archive" -C "$dest" "$@" ;;
+    *.zip)          unzip -qq -o "$archive" -d "$dest" ;;
+    *) echo "unpack: don't know how to unpack $archive" >&2; return 1 ;;
+  esac
+}
+
+# aria2c cannot detect a truncated download from an endpoint that streams without
+# a Content-Length: it has no expected total, so it reports success on a short
+# file and the damage surfaces later as "unexpected end of file". Unpacking is
+# the only integrity check available, so retry the two together.
+# Args: url, archive path, destination, then any extra options for tar.
+fetch_unpack() {
+  local url="$1" archive="$2" dest="$3" i=0; shift 3
+  mkdir -p "$dest"
+  while :; do
+    rm -f "$archive" "$archive.aria2"
+    if fetch --dir="$(dirname "$archive")" -o "$(basename "$archive")" "$url" \
+       && unpack "$archive" "$dest" "$@"; then
+      rm -f "$archive"
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge 5 ] && { echo "fetch_unpack: $url still incomplete after $i attempts" >&2; return 1; }
+    echo "fetch_unpack: $(basename "$archive") came down incomplete, retry $i/5 in $((5 * i))s..." >&2
+    sleep $((5 * i))
   done
 }
 
@@ -105,12 +136,9 @@ if [ ! -x "$BOOT_JDK/bin/javac" ]; then
   fetch --dir=/tmp -o azul-boot.json "$boot_api"
   boot_url="$(python3 -c 'import json; print(json.load(open("/tmp/azul-boot.json"))["url"])' < /dev/null)"
   rm -f /tmp/azul-boot.json
-  # Download & unpack
-  fetch --dir="$ROOTDIR" -o boot-jdk.tar.gz "$boot_url"
-  rm -rf "$BOOT_JDK"; mkdir -p "$BOOT_JDK"
+  rm -rf "$BOOT_JDK"
   # Azul Zulu archives nest everything under one zulu*-ca-jdk*/ dir; strip it.
-  tar -xzf "$ROOTDIR/boot-jdk.tar.gz" -C "$BOOT_JDK" --strip-components=1
-  rm -f "$ROOTDIR/boot-jdk.tar.gz"
+  fetch_unpack "$boot_url" "$ROOTDIR/boot-jdk.tar.gz" "$BOOT_JDK" --strip-components=1
 fi
 
 # --- patches ----------------------------------------------------------------

@@ -29,6 +29,52 @@ cd "$ROOTDIR"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
+# Download with retries; aria2's own --retry-on-unknown is missing from older
+# builds. --allow-overwrite/--auto-file-renaming keep a retry from parking the
+# second attempt beside the first as NAME.1.
+fetch() {
+  local i=0
+  until aria2c --console-log-level=error --check-certificate=false \
+               --max-tries=5 --retry-wait=2 --connect-timeout=15 \
+               --allow-overwrite=true --auto-file-renaming=false "$@"; do
+    i=$((i + 1)); [ "$i" -ge 5 ] && { echo "fetch: giving up after $i attempts" >&2; return 1; }
+    echo "fetch: aria2c failed, retry $i/5 in 2s..." >&2; sleep 2
+  done
+}
+
+unpack() {
+  local archive="$1" dest="$2"; shift 2
+  case "$archive" in
+    *.tar.gz|*.tgz) tar -xzf "$archive" -C "$dest" "$@" ;;
+    *.tar.xz)       tar -xJf "$archive" -C "$dest" "$@" ;;
+    *.tar.bz2)      tar -xjf "$archive" -C "$dest" "$@" ;;
+    *.zip)          unzip -qq -o "$archive" -d "$dest" ;;
+    *) echo "unpack: don't know how to unpack $archive" >&2; return 1 ;;
+  esac
+}
+
+# aria2c cannot detect a truncated download from an endpoint that streams
+# without a Content-Length: it has no expected total, so it reports success on a
+# short file and the damage surfaces later as "unexpected end of file". Unpacking
+# is the only integrity check available, so retry the two together.
+# Args: url, archive path, destination, then any extra options for tar.
+fetch_unpack() {
+  local url="$1" archive="$2" dest="$3" i=0; shift 3
+  mkdir -p "$dest"
+  while :; do
+    rm -f "$archive" "$archive.aria2"
+    if fetch --dir="$(dirname "$archive")" -o "$(basename "$archive")" "$url" \
+       && unpack "$archive" "$dest" "$@"; then
+      rm -f "$archive"
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge 5 ] && { echo "fetch_unpack: $url still incomplete after $i attempts" >&2; return 1; }
+    echo "fetch_unpack: $(basename "$archive") came down incomplete, retry $i/5 in $((5 * i))s..." >&2
+    sleep $((5 * i))
+  done
+}
+
 [ -x "$BOOT_JDK/bin/javac" ] || { echo "boot JDK not found at $BOOT_JDK (run fetch-source.sh)" >&2; exit 1; }
 [ -d "$SRC" ] || { echo "source tree not found at $SRC (run fetch-source.sh)" >&2; exit 1; }
 
@@ -47,7 +93,7 @@ case "$ARCH" in
     if [ "$JDK_VERSION" -ge 25 ] 2>/dev/null; then JVM_VARIANT=zero; else JVM_VARIANT=server; fi ;;
   arm|armeb|armhf|armv7a|thumb|thumbeb)
     # 8 has no 32-bit ARM HotSpot to build: jdk8u mainline ships cpu ports for
-    # aarch64, ppc, sparc, x86 and zero only — JDK 8's ARM32 JIT lived in
+    # aarch64, ppc, sparc, x86 and zero only, JDK 8's ARM32 JIT lived in
     # Oracle's separate arm-port forest and never landed here. Left on server it
     # picks up no arch at all and compiles the VM with the i486 flags
     # ("unsupported argument 'i586' to option '-march='"). 11+ carry
@@ -83,8 +129,8 @@ case "$PLATFORM" in
     TARGET_OS=linux
     # musl is static here and there is no way around it: zig supports musl only
     # as a static libc, so these targets link it in whether or not we ask.
-    # -static-libgcc folds libgcc in to match. What that costs is dlopen — it
-    # always fails in a statically linked musl binary — so anything the JDK
+    # -static-libgcc folds libgcc in to match. What that costs is dlopen: it
+    # always fails in a statically linked musl binary, so anything the JDK
     # loads at run time rather than links (fontconfig, cups, the miniaudio
     # backends) is unavailable on musl. glibc keeps libc dynamic and keeps all
     # of it.
@@ -121,8 +167,8 @@ case "$PLATFORM" in
     #   2. every release declares VALID_TOOLCHAINS_windows="microsoft", so
     #      --with-toolchain-type=clang is refused even past that point.
     #   3. the windows halves of NativeCompilation.gmk and the flags m4s are
-    #      written around MSVC conventions -- .obj, link.exe, LIB, MT, RC,
-    #      manifests -- which mingw does not share.
+    #      written around MSVC conventions (.obj, link.exe, LIB, MT, RC,
+    #      manifests) which mingw does not share.
     #
     # Getting windows JDKs out of this repository means building them on a
     # windows runner with MSVC, which is a separate path from everything here,
@@ -139,7 +185,7 @@ case "$PLATFORM" in
     # build host or the compiler:
     #
     #   basic.m4 runs BASIC_SETUP_PATHS_WINDOWS whenever the *target* is
-    #   windows, and that macro wants a windows environment underneath it --
+    #   windows, and that macro wants a windows environment underneath it,
     #   cygpath or wslpath, then a cmd.exe it can execute:
     #     configure: error: Incorrect linux installation. Neither cygpath nor
     #     wslpath was found
@@ -148,9 +194,9 @@ case "$PLATFORM" in
     #   windows.
     #
     #   toolchain.m4 allows only "microsoft" for windows targets. The link
-    #   layer underneath is keyed on TOOLCHAIN_TYPE, not on the OS -- Link.gmk
+    #   layer underneath is keyed on TOOLCHAIN_TYPE, not on the OS; Link.gmk
     #   already carries a clang branch, and LinkMicrosoft.gmk only supplies
-    #   macros the microsoft path calls -- so clang is worth allowing through.
+    #   macros the microsoft path calls, so clang is worth allowing through.
     #
     # Whether that is enough is exactly what the next run measures; this is the
     # first step of an unsupported configuration, not a finished one.
@@ -169,7 +215,7 @@ case "$PLATFORM" in
 
     # Same shape again: lib-std.m4 hunts for the Visual Studio runtime DLLs to
     # bundle into the image whenever the target is windows, though they are a
-    # microsoft-toolchain artifact —
+    # microsoft-toolchain artifact:
     #   configure: error: Could not find . Please specify using --with-msvcr-dll
     # (the name is blank because MSVCR_NAME is only set by the VS detection that
     # never ran). mingw links the system msvcrt and carries its own runtime,
@@ -187,8 +233,8 @@ case "$PLATFORM" in
     # MakeBase.gmk reaches for it on any windows target, so the command
     # collapses to a bare "convert" and the build tools fail:
     #   /usr/bin/bash: line 1: convert: command not found
-    # Cross-compiling from linux there is nothing to rewrite -- every tool in
-    # the build is a linux executable taking linux paths -- so fall through to
+    # Cross-compiling from linux, there is nothing to rewrite: every tool in
+    # the build is a linux executable taking linux paths, so fall through to
     # the identity definitions the other platforms use, but only when
     # FIXPATH_BASE is genuinely absent, leaving a real windows host untouched.
     MB="$SRC/make/common/MakeBase.gmk"
@@ -284,15 +330,15 @@ EOF
           ;;
       esac
 
-      # windows.h's min() and max() macros: mingw defines them for C only --
-      # minwindef.h guards them with #ifndef __cplusplus -- where MSVC defines
+      # windows.h's min() and max() macros: mingw defines them for C only;
+      # minwindef.h guards them with #ifndef __cplusplus, where MSVC defines
       # them for C++ as well. So every .c file is fine and the C++ ones are not:
       #   D3DVertexCacher.cpp:332: error: use of undeclared identifier 'max';
       #   did you mean 'fmax'?
       # Shadow minwindef.h, chain to the real one, and add the missing half.
       # Going through the header rather than the command line keeps this to the
       # translation units that actually include windows.h, which is what MSVC
-      # does, and respects NOMINMAX -- so hotspot, which sets it deliberately so
+      # does, and respects NOMINMAX, so hotspot, which sets it deliberately so
       # the macros cannot shadow std::min/std::max, still gets neither.
       if [ -e "$MINGW_INC/minwindef.h" ]; then
         cat > "$CASE_INC/minwindef.h" <<'EOF'
@@ -311,13 +357,13 @@ EOF
       fi
       # WIN32_LEAN_AND_MEAN keeps windows.h from pulling in rpc.h, objbase.h and
       # ole2.h, which are what define "interface" as a macro for struct. hotspot
-      # uses that as an ordinary identifier -- opto/type.hpp has a bool
-      # parameter called interface -- and undefining it once is not enough,
+      # uses that as an ordinary identifier: opto/type.hpp has a bool
+      # parameter called interface, and undefining it once is not enough,
       # because a later windows.h in the same translation unit brings it back.
       # MSVC gets away with the same include chain because its windows.h leaves
       # that definition to the COM headers hotspot never asks for.
       # -fms-extensions: hotspot guards its memory probes with structured
-      # exception handling —
+      # exception handling,
       #   safefetch_windows.hpp:37: error: use of undeclared identifier '__try'
       # clang parses __try/__except only with MS extensions enabled. It
       # implements SEH for x86_64 and aarch64 windows; 32-bit x86 it does not,
@@ -325,7 +371,7 @@ EOF
       # flags-cflags.m4 sets -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0602 for
       # every windows binary, but only in the microsoft branch, so a clang
       # windows build gets neither. NOMINMAX belongs with them but is added to
-      # ALWAYS_DEFINES_JVM alone -- hotspot wants windows.h's min/max macros
+      # ALWAYS_DEFINES_JVM alone, hotspot wants windows.h's min/max macros
       # gone so they cannot shadow std::min/std::max, while the JDK libraries
       # still use min() as a macro (ProcessImpl_md.c does). It is applied to the
       # JVM only, further down.
@@ -337,7 +383,7 @@ EOF
       # on the OS and so already reaches us; repeating it here is harmless.)
       WIN_DEFS="-DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0602 -DWIN32 -DIAL"
       # -Wno-nonportable-include-path: the aliases above are exactly what that
-      # warning is for -- <Windows.h> resolving to a file named windows.h -- so
+      # warning is for, <Windows.h> resolving to a file named windows.h, so
       # it fires on every capitalised include in the tree, hundreds of times,
       # for something deliberate. Silencing it keeps real diagnostics findable.
       # The windows sources were written against MSVC, which takes mismatched
@@ -350,7 +396,7 @@ EOF
       # warnings rather than silencing them, so they stay visible in the log.
       WIN_LAX="-Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
       WIN_CFLAGS="-I$CASE_INC $WIN_DEFS -fms-extensions -Wno-nonportable-include-path $WIN_LAX"
-      # 32-bit x86 only: hotspot reaches for SEH -- __try/__except -- in jni.cpp,
+      # 32-bit x86 only: hotspot reaches for SEH (__try/__except) in jni.cpp,
       # os_windows.cpp, os_windows_x86.cpp, safefetch_windows.hpp and
       # threadCrashProtection_windows.cpp. clang lowers those into MSVC-style
       # 32-bit SEH, but i686-w64-mingw32 defaults to the DWARF exception model,
@@ -376,8 +422,8 @@ EOF
     #   'void *' with an rvalue of type 'FARPROC'
     # Cast it, the way the same file already does elsewhere for GetProcAddress
     # results.
-    # Windows libraries are listed MSVC-style throughout the build --
-    # LIBS_windows := kernel32.lib user32.lib ws2_32.lib ... -- and clang for
+    # Windows libraries are listed MSVC-style throughout the build
+    # (LIBS_windows := kernel32.lib user32.lib ws2_32.lib ...), and clang for
     # mingw reads a bare foo.lib as a filename rather than a library to search
     # for:
     #   clang: error: no such file or directory: 'powrprof.lib'
@@ -412,12 +458,12 @@ EOF
     # untranslated:
     #   clang: error: no such file or directory: 'kernel32.lib'
     # The anchor is the end of the LIBS assembly, which is the same point in the
-    # macro that Link.gmk's _STRIPFLAGS line marks on 25 -- after the per-OS and
+    # macro that Link.gmk's _STRIPFLAGS line marks on 25, after the per-OS and
     # per-toolchain lists have been folded in, before the link command is built.
     # 21 spells that assembly over two lines, the second folding in the
     # _$(TOOLCHAIN_TYPE) variants; 17 has no such variants and stops at the
-    # per-OS line. Match whichever line ends the statement -- the one naming
-    # _LIBS_$(OPENJDK_TARGET_OS that does not continue onto the next -- so the
+    # per-OS line. Match whichever line ends the statement, the one naming
+    # _LIBS_$(OPENJDK_TARGET_OS that does not continue onto the next, so the
     # block lands after the whole list either way, and after the EXTRA_LDFLAGS
     # assembly that both versions put immediately above it.
     NC="$SRC/make/common/NativeCompilation.gmk"
@@ -462,7 +508,7 @@ EOF
     #   BASIC_JDKLIB_LIBS="-ljava -ljvm"
     # which is the unix way of naming those two, keyed on the toolchain when what
     # it describes is the target: on windows the module makefiles already list
-    # them, as $(WIN_JAVA_LIB) -- a full path to java.lib -- and jvm.lib, so
+    # them, as $(WIN_JAVA_LIB), a full path to java.lib, and jvm.lib, so
     # mingw needs the empty value microsoft gets, not the unix one. 25 dropped
     # JDKLIB_LIBS entirely.
     LM4="$SRC/make/autoconf/libraries.m4"
@@ -477,7 +523,7 @@ EOF
     # and -std=c11 is a C-only flag:
     #   error: invalid argument '-std=c11' not allowed with 'C++'
     # on libawt's CmdIDList.cpp. libawt is C everywhere but windows, where half
-    # of it is C++, and it names only CFLAGS -- which upstream gets away with
+    # of it is C++, and it names only CFLAGS, which upstream gets away with
     # because cl.exe ignores -std:c11 on a C++ file rather than refusing it, and
     # because a unix library with C++ sources always sets CXXFLAGS or gcc would
     # have failed the same way. Swap the language standard as the flags are
@@ -519,7 +565,7 @@ EOF
     # 25 lowercased these upstream (mswsock.lib there); 21 still has Mswsock.lib
     # in java.base and Secur32.lib twice in java.security.jgss, so sweep the
     # makefiles once instead of meeting them one link at a time. Only bare names
-    # are touched -- a match must start at the beginning of a line or after
+    # are touched, a match must start at the beginning of a line or after
     # whitespace, which leaves $(SUPPORT_OUTPUTDIR)/.../net.lib and $(WIN_JAVA_LIB)
     # alone.
     win_lib_case=0
@@ -544,8 +590,8 @@ EOF
     # 21 dropped the pragma and names the library in the makefile instead, where
     # the sweep above already reaches it. Lowercase these the same way. The name
     # is taken whole, between the quotes: the suffix is optional in this pragma
-    # and jpackage writes both spellings -- "Mswsock.lib" in java.base, bare
-    # "Shell32" and "user32" of its own -- so anything narrower rewrites some of
+    # and jpackage writes both spellings, "Mswsock.lib" in java.base, bare
+    # "Shell32" and "user32" of its own, so anything narrower rewrites some of
     # them and leaves the rest to fail at the next link.
     win_pragma_case=0
     while IFS= read -r f; do
@@ -567,8 +613,8 @@ EOF
     #   lld: error: unable to find library -ljvm
     # mingw wants the unix flag spelling with the windows file naming, and
     # lld's mingw mode does search for <name>.lib, which is what the import
-    # libraries are called. Split the choice by toolchain and leave LIBFILE --
-    # the make dependency -- named as before.
+    # libraries are called. Split the choice by toolchain and leave LIBFILE,
+    # the make dependency, named as before.
     JNC="$SRC/make/common/JdkNativeCompilation.gmk"
     if [ -f "$JNC" ] && grep -q 'LDFLAGS += -libpath:' "$JNC"; then
       awk '
@@ -652,8 +698,8 @@ EOF
     # reimplementing the symbol dump on llvm-nm: the mapfile's contents are
     # vftable symbols for debugging tools, and mingw exports the JNI entry points
     # from __declspec(dllexport) on its own.
-    # The whole file exists only to produce JVM_MAPFILE — nothing else consumes
-    # its targets — so emptying that variable and skipping the include removes
+    # The whole file exists only to produce JVM_MAPFILE and nothing else consumes
+    # its targets, so emptying that variable and skipping the include removes
     # the dumpbin call and leaves no rule with an empty target behind. Keyed on
     # the DUMPBIN branch actually being there, which is what 25 lacks.
     JMF="$SRC/make/hotspot/lib/JvmMapfile.gmk"
@@ -687,21 +733,21 @@ EOF
     #   AwtLibraries.gmk: CFLAGS_windows := -EHsc ...
     #   clang: error: unknown argument: '-EHsc'
     # These are switches with no cl.exe-independent meaning at all, so there is
-    # nothing to translate -- clang's defaults already match what each one asks
+    # nothing to translate: clang's defaults already match what each one asks
     # for (exceptions on for C++, UTF-8 sources, no banner). Strip the ones that
     # are unambiguously MSVC-only, in one pass over the makefiles, rather than
     # meeting them one build failure at a time.
     # -MD and -MT are included after checking every occurrence in make/**/*.gmk:
     # all of them select a runtime library for cl.exe, none generates
     # dependencies, which is what left them out before. Leaving -MT in is worse
-    # than removing it -- clang's -MT takes an argument, so
+    # than removing it: clang's -MT takes an argument, so
     #   CXXFLAGS := -MT -DACCESSBRIDGE_ARCH_64
     # quietly consumed that define rather than failing, and the accessibility
     # tools have been building without it.
     # A comma ends an argument in these makefiles, so it has to be excluded from
     # -Zc:'s value and accepted as a terminator in its own right. Getting that
     # wrong ate the comma after CXXFLAGS_FILTER_OUT := -Zc:wchar_t-, which
-    # merged that argument with the CXXFLAGS following it -- so jabswitch lost
+    # merged that argument with the CXXFLAGS following it, so jabswitch lost
     # its whole flag list, -DUNICODE included, and picked the ANSI half of every
     # windows API while passing it wide literals.
     # The flags are matched with either spelling of the switch character. cl.exe
@@ -728,8 +774,8 @@ EOF
       fi
     fi
 
-    # The version-info resource compiles fine -- llvm-mingw's rc handles the
-    # .rc and the -Fo spelling -- but the step after it does not. RC cannot
+    # The version-info resource compiles fine, llvm-mingw's rc handles the
+    # .rc and the -Fo spelling, but the step after it does not. RC cannot
     # report its own includes, so the build re-runs the resource through the C
     # compiler purely to harvest a dependency list, in MSVC's dialect and
     # without asking which toolchain is in use:
@@ -760,7 +806,7 @@ EOF
     done
 
     # libawt's alloc.h declares its own std::bad_alloc rather than including
-    # <new>, to keep awt.dll from depending on msvcp50.dll -- a saving the
+    # <new>, to keep awt.dll from depending on msvcp50.dll, a saving the
     # comment there puts at 500kb, and a concern that has not applied to any
     # toolchain in twenty years. It does apply here, as a hard error:
     #   alloc.h:35: error: redefinition of 'bad_alloc'
@@ -802,11 +848,11 @@ EOF
       log "Casting the ToUnicodeEx buffer in awt_Component.cpp"
     fi
 
-    # awt_ole.h reaches for the COM smart pointers -- IStreamPtr and friends:
+    # awt_ole.h reaches for the COM smart pointers, IStreamPtr and friends:
     #   awt_DnDDT.cpp:819: error: unknown type name 'IStreamPtr'
     # MSVC declares those in comdef.h. mingw has them too, in comdefsp.h, but
     # that file disables itself unless USE___UUIDOF is 1, and _mingw.h sets that
-    # only for MSVC -- everyone else gets the template-based __uuidof emulation
+    # only for MSVC, everyone else gets the template-based __uuidof emulation
     # instead, which comdefsp.h was never taught about. Declare the ones this
     # tree actually names, with comdef.h's own macro, so the emulation is what
     # ends up being used. Each is guarded the way comdefsp.h guards its own, so
@@ -847,7 +893,7 @@ EOF
     #   error: redeclaration of 'gss_release_cred' cannot add 'dllexport'
     # Drop the attribute from all of them. It is the only file in the library,
     # so with no explicit exports left, mingw falls back to exporting every
-    # symbol -- which is what a bridge DLL resolved through GetProcAddress
+    # symbol, which is what a bridge DLL resolved through GetProcAddress
     # needs anyway.
     SSPI="$SRC/src/java.security.jgss/windows/native/libsspi_bridge/sspi.cpp"
     if [ -f "$SSPI" ] && grep -q '^__declspec(dllexport) ' "$SSPI"; then
@@ -856,17 +902,17 @@ EOF
     fi
 
     # jaccessinspectorWindow.rc names its menu cjaccessinspectorMenus, which no
-    # header defines -- the resource header still calls it cFerretMenus, from
+    # header defines, the resource header still calls it cFerretMenus, from
     # before the tool was renamed. MSVC's rc quietly treats an unknown
     # identifier as a string resource name; llvm-rc does not:
     #   llvm-rc: Error parsing file: expected int or string, got
     #   cjaccessinspectorMenus
-    # Quote it, which is what MSVC decided it meant -- but only where the
+    # Quote it, which is what MSVC decided it meant, but only where the
     # dialog refers to the menu ("MENU <name>"), not where the menu declares
     # itself ("<name> MENU"). The two positions take different things: llvm-rc
     # wants an int or string for the reference and an int or identifier for the
     # declaration, so quoting both, or the wrong one, just trades one parse
-    # error for the other. Only names that really are undefined are touched --
+    # error for the other. Only names that really are undefined are touched,
     # quoting a macro would turn an integer id into a string one.
     for rc in "$SRC"/src/jdk.accessibility/windows/native/*/*.rc; do
       [ -f "$rc" ] || continue
@@ -880,18 +926,18 @@ EOF
     done
 
     # splashscreen_sys.c calls alloca without including <malloc.h>, where both
-    # MSVC and mingw declare it -- MSVC's windows.h chain happens to pull it in:
+    # MSVC and mingw declare it, MSVC's windows.h chain happens to pull it in:
     #   splashscreen_sys.c:147: error: use of undeclared identifier 'alloca'
     # The include alone is not enough: mingw hides the unprefixed spelling
     # behind NO_OLDNAMES, which _mingw.h sets whenever __STRICT_ANSI__ is, and
     # the JDK compiles C as -std=c11 rather than gnu11. Rather than loosen the
     # language level for the whole build, spell out the definition mingw would
-    # have given us -- it is the same __builtin_alloca either way.
+    # have given us, it is the same __builtin_alloca either way.
     # It has to be object-like. The call site passes alloca to a macro as a
     # bare token, and sizecalc.h invokes it as (func)(size); a function-like
     # macro is not expanded when its name is not followed by a parenthesis, so
     # the identifier survives to the compiler and is undeclared. Aliasing the
-    # name instead expands in both positions -- which is exactly the form
+    # name instead expands in both positions, which is exactly the form
     # mingw's own non-GNU branch uses.
     SPL="$SRC/src/java.desktop/windows/native/libsplashscreen/splashscreen_sys.c"
     if [ -f "$SPL" ] && ! grep -q '^#define alloca __builtin_alloca$' "$SPL"; then
@@ -905,14 +951,14 @@ EOF
     # runtime it needs is simply absent:
     #   ld.lld: error: undefined symbol: operator delete(void*)
     #   ld.lld: error: undefined symbol: std::nothrow
-    # SetupNativeCompilation takes that as LINK_TYPE := C++. sspi_bridge -- one
-    # C++ file -- does not say it, and saproc says LINK_TYPE := C outright for
+    # SetupNativeCompilation takes that as LINK_TYPE := C++. sspi_bridge, one
+    # C++ file, does not say it, and saproc says LINK_TYPE := C outright for
     # every OS but linux. Nothing upstream noticed, because the windows-only
     # C++ libraries have only ever been linked by MSVC, where link.exe serves
     # both languages and the CRT carries operator new either way. Rather than
     # name each library as it turns up, infer it from the sources, which are
     # known one step after the toolchain is set up. C++ sources always win over
-    # a declared C link type -- a C driver cannot link them anywhere, and the
+    # a declared C link type, a C driver cannot link them anywhere, and the
     # declaration only ever meant "MSVC will sort it out". A caller that named
     # its own linker is still left alone.
     # Two shapes to cover. 25 splits the native makefiles under
@@ -980,7 +1026,7 @@ EOF
     # BUILD toolchains, and spell the flag by toolchain for the rest.
     # -manifest:embed goes the same way: it is a link.exe feature with no lld
     # equivalent, and 25's generic Link.gmk simply has no manifest support, so
-    # gating it here leaves 21 behaving as 25 already does -- executables from
+    # gating it here leaves 21 behaving as 25 already does: executables from
     # the mingw path carry no embedded manifest.
     if [ -f "$NCG" ] && grep -q '"-implib:' "$NCG"; then
       awk '
@@ -1029,12 +1075,12 @@ EOF
     # type of its own. clang spells that -fno-wchar, and it cannot be used
     # here: mingw's headers take a builtin wchar_t for granted in C++ and stop
     # declaring the type at all without it, so corecrt.h and stdio.h fall over
-    # with "unknown type name 'wchar_t'". Cast at the JNI boundary instead --
+    # with "unknown type name 'wchar_t'". Cast at the JNI boundary instead,
     # both types are 16-bit unsigned on windows, which is the assumption the
     # MSVC flag encodes anyway.
     # Only 21+ needs this: 17 and earlier build the name with NewStringUTF() off
     # a char*, so there is no wchar_t at the JNI boundary to reconcile. Keying
-    # the guard on the unfixed call keeps it idempotent too -- once cast, the
+    # the guard on the unfixed call keeps it idempotent too: once cast, the
     # text reads NewString((const jchar*)pszNameString and no longer matches.
     SEC="$SRC/src/jdk.crypto.mscapi/windows/native/libsunmscapi/security.cpp"
     if [ -f "$SEC" ] && grep -q 'env->NewString(pszNameString' "$SEC"; then
@@ -1072,7 +1118,7 @@ EOF
     # where MSVC waves it through:
     #   symbolengine.cpp:114: error: incompatible integer to pointer conversion
     #   assigning to 'HINSTANCE__ *' from 'char'
-    # 21 writes a plain 0 -- still zero for the char case, a null pointer
+    # 21 writes a plain 0: still zero for the char case, a null pointer
     # constant for the pointer one. Adopt that, which makes the file identical
     # to 21's here.
     SYE="$SRC/src/hotspot/os/windows/symbolengine.cpp"
@@ -1085,8 +1131,8 @@ EOF
 
     # topLevelExceptionFilter default-constructs a frame ("frame fr;"), but
     # frame::frame() is an inline living in the cpu's frame_<cpu>.inline.hpp, and
-    # 17's os_windows.cpp never reaches it -- no include of runtime/frame.inline.hpp
-    # and no transitive path to it -- so nothing emits the body:
+    # 17's os_windows.cpp never reaches it, no include of runtime/frame.inline.hpp
+    # and no transitive path to it, so nothing emits the body:
     #   ld.lld: error: undefined symbol: frame::frame()
     #   >>> referenced by os_windows.obj:(topLevelExceptionFilter(...))
     # runtime/frame.inline.hpp pulls in CPU_HEADER_INLINE(frame), which is where
@@ -1105,7 +1151,7 @@ EOF
     # windows target gets lib.exe's spelling whatever the toolchain is:
     #   ARFLAGS="-nologo -NODEFAULTLIB:MSVCRT"
     # llvm-ar is not lib.exe and refuses them, which stops the first static
-    # library the build reaches -- 17 still archives fdlibm, 21 converted it to
+    # library the build reaches, 17 still archives fdlibm, 21 converted it to
     # java and never gets here:
     #   x86_64-w64-mingw32-ar: error: unknown option n
     #   CoreLibraries.gmk:44: .../fdlibm.lib] Error 1
@@ -1160,7 +1206,7 @@ EOF
       log "Spacing sspi.cpp's PP macro and splitting the declarations its gotos skip"
     fi
 
-    # With TSTRINGS_WITH_WCHAR on -- which the block above turns on for clang --
+    # With TSTRINGS_WITH_WCHAR on, which the block above turns on for clang,
     # tstrings::any streams into a wostringstream, and 17 has no overload taking
     # a narrow string, so "any << lastCRTError()" lands on the generic template.
     # The only way that compiles is through the any-to-wostream operator further
@@ -1170,7 +1216,7 @@ EOF
     #   note: 'operator<<' should be declared prior to the call site
     # 21 added an explicit std::string overload that converts with fromUtf8, so
     # the template is never instantiated for it. 17 already has the matching
-    # constructor and fromUtf8, so take the overload as 21 writes it -- ahead of
+    # constructor and fromUtf8, so take the overload as 21 writes it, ahead of
     # the TSTRINGS_WITH_WCHAR block, so the narrow build gets it too.
     TST="$SRC/src/jdk.jpackage/share/native/common/tstrings.h"
     if [ -f "$TST" ] && ! grep -q 'any& operator << (const std::string& msg)' "$TST"; then
@@ -1186,7 +1232,7 @@ EOF
     # valid preprocessing token and only survives because MSVC allows it:
     #   D3DBlitLoops.cpp:147: error: pasting formed '" failed in "__FILE__",
     #   return;"', an invalid preprocessing token
-    # Every ## in the header joins string literals -- the neighbouring # that
+    # Every ## in the header joins string literals, the neighbouring # that
     # stringifies a macro argument is a different operator and stays. 21 removed
     # them all, leaving plain literal concatenation, so do the same.
     D3DP="$SRC/src/java.desktop/windows/native/libawt/java2d/d3d/D3DPipeline.h"
@@ -1210,8 +1256,8 @@ EOF
     # control flow, which is what it did for sspi.cpp too.
     #
     # awt_Canvas is the one the compiler named. The other three are the same
-    # construct -- a declaration with an initialiser standing after a _GOTO
-    # macro -- found by reading the sources rather than by a build. Splitting a
+    # construct, a declaration with an initialiser standing after a _GOTO
+    # macro, found by reading the sources rather than by a build. Splitting a
     # pointer or handle declaration is semantics-neutral whether or not a goto
     # actually crosses it, so they are done here rather than one 9-minute build
     # at a time. Each is applied only if its exact text is present; the
@@ -1221,7 +1267,7 @@ EOF
       # Find them rather than meet them one build at a time: walk each file
       # tracking brace depth and, from a _GOTO macro until its label, report the
       # declarations-with-initialiser sitting at the goto's own depth. Depth is
-      # what makes this accurate -- a declaration inside a nested block is jumped
+      # what makes this accurate, a declaration inside a nested block is jumped
       # over, not into, and is legal. const and static are skipped: one cannot be
       # separated from its initialiser, the other would change meaning.
       mkdir -p "$BUILD_DIR"
@@ -1295,7 +1341,7 @@ PLEOF
     fi
 
     # Three of the access bridge's getters return jobject but hand
-    # EXCEPTION_CHECK -- which expands to a return -- an AccessibleContext, and a
+    # EXCEPTION_CHECK, which expands to a return, an AccessibleContext, and a
     # fourth returns one directly. AccessibleContext is a jlong, so that is an
     # integer where a pointer belongs:
     #   AccessBridgeJavaEntryPoints.cpp:1044: error: cannot initialize return
@@ -1327,7 +1373,7 @@ PLEOF
     # alloc.h poisons malloc/calloc/realloc so JDK code cannot call them:
     #   #define malloc Do_Not_Use_malloc_Use_safe_Malloc_Instead
     # awt_ole.h includes mingw's comdef.h, which includes comip.h, which calls
-    # malloc itself -- so once awt.h has been included first, a system header
+    # malloc itself, so once awt.h has been included first, a system header
     # inherits the poison and stops the build:
     #   comip.h:252: error: use of undeclared identifier
     #   'Do_Not_Use_malloc_Use_safe_Malloc_Instead'
@@ -1364,7 +1410,7 @@ PLEOF
 
     # libjsvml is the SVML vector math library, and its windows sources are
     # MASM: assembled by ml64.exe upstream, and unparseable to clang's GNU
-    # assembler from the copyright header down --
+    # assembler from the copyright header down,
     #   jsvml_d_acos_windows_x86.S:25: error: invalid instruction mnemonic
     #   'questions.'
     # There are hundreds of these files and no translation worth attempting;
@@ -1399,13 +1445,13 @@ PLEOF
     fi
 
     # socketTransport.c names a variable "interface", which is a macro in the
-    # windows SDK -- basetyps.h defines it as struct for COM's benefit:
+    # windows SDK, basetyps.h defines it as struct for COM's benefit:
     #   socketTransport.c:58: error: declaration of anonymous struct must be a
     #   definition
     # WIN32_LEAN_AND_MEAN keeps that out of hotspot's include chain, but this
     # file reaches it through winsock2.h. Undefining it once works here, unlike
     # in hotspot, because everything this file includes comes before the
-    # declaration -- there is no later windows.h to bring the macro back.
+    # declaration, there is no later windows.h to bring the macro back.
     SKT="$SRC/src/jdk.jdwp.agent/share/native/libdt_socket/socketTransport.c"
     if [ -f "$SKT" ] && ! grep -q '^#undef interface$' "$SKT"; then
       perl -0pi -e 's/^(static struct jdwpTransportNativeInterface_ interface;)$/#undef interface\n$1/m' "$SKT"
@@ -1489,7 +1535,7 @@ PLEOF
     # A function pointer does not implicitly convert to void* in standard C++;
     # MSVC permits it. The address is only used for diagnostics. Add a
     # forwarding constructor that takes any pointer and does the cast, rather
-    # than editing the call sites -- there are dozens across the windows
+    # than editing the call sites, there are dozens across the windows
     # sources, and the non-template constructor still wins for the ordinary
     # data-pointer and nullptr cases.
     WEH="$SRC/src/jdk.jpackage/windows/native/common/WinErrorHandling.h"
@@ -1511,12 +1557,12 @@ PLEOF
       log "Letting SysError take a function pointer for the failing call"
     fi
 
-    # jpackage opens files by handing a tstring -- std::wstring on windows --
+    # jpackage opens files by handing a tstring (std::wstring on windows)
     # straight to std::ifstream:
     #   PackageFile.cpp:44: error: no matching constructor for initialization
     #   of 'std::ifstream'
     # MSVC's STL has a const std::wstring& overload; libc++ has only the
-    # const wchar_t* one. Call c_str(), which keeps the path wide -- converting
+    # const wchar_t* one. Call c_str(), which keeps the path wide, converting
     # it to a narrow string would hand msvcrt an ANSI-codepage path and lose
     # any character outside it.
     # Both spellings need it: the constructor and a later open(). Restricted to
@@ -1569,7 +1615,7 @@ PLEOF
     # it is for: registering the CA with the linker so no .def file is needed.
     # These functions are already extern "C", so __declspec(dllexport) exports
     # each under the plain name MSI looks up, which is the same outcome. Both
-    # macros get it -- adding it to the definition alone would leave the
+    # macros get it, adding it to the definition alone would leave the
     # declaration in JP_CA_DECLARE disagreeing, which clang rejects once the
     # earlier one has been used.
     MCA="$SRC/src/jdk.jpackage/windows/native/common/MsiCA.h"
@@ -1591,7 +1637,7 @@ PLEOF
       log "Exporting the MSI custom actions with dllexport instead of a linker comment"
     fi
 
-    # The jpackage launchers enter at wmain / wWinMain -- the wide entry
+    # The jpackage launchers enter at wmain / wWinMain, the wide entry
     # points, which MSVC's CRT selects on its own:
     #   ld.lld: error: undefined symbol: WinMain
     #   >>> referenced by crtexewin.c:62  libmingw32.a(crtexewin.o):(main)
@@ -1620,8 +1666,8 @@ PLEOF
     # the file is AccessBridgeCallbacks.h. NTFS never noticed; a linux host
     # does. Same problem as the capitalised windows headers above, except these
     # are the JDK's own, so alias them where they live. Written as a search
-    # rather than a rename so a header that really is lowercase --
-    # accessBridgeResource.h is one -- is left alone.
+    # rather than a rename so a header that really is lowercase,
+    # accessBridgeResource.h is one, is left alone.
     ACC="$SRC/src/jdk.accessibility"
     if [ -d "$ACC" ]; then
       grep -rhoE '#[[:space:]]*include[[:space:]]*"[A-Za-z0-9_]+\.h"' "$ACC" 2>/dev/null \
@@ -1642,7 +1688,7 @@ PLEOF
     # The whole module treats the two as one type: every GetStringChars result
     # is cast to const wchar_t* on the way in, and handed back to
     # ReleaseStringChars uncast on the way out. Cast both directions, in every
-    # file, rather than one call per probe -- there are four NewString and
+    # file, rather than one call per probe, there are four NewString and
     # fifteen ReleaseStringChars sites across the two files, two of the latter
     # inside a macro.
     if [ -d "$ACC" ] && grep -rq 'NewString(.*wcslen(\|ReleaseStringChars(' "$ACC"; then
@@ -1665,8 +1711,8 @@ PLEOF
     # mingw's knownfolders.h at most declares:
     #   ld.lld: error: undefined symbol: FOLDERID_Profile
     # MSVC finds the definition in uuid.lib, which it links by default. Pulling
-    # <initguid.h> in first -- the documented way to make DEFINE_GUID emit
-    # definitions -- did not work here: it left the identifier undeclared
+    # <initguid.h> in first, the documented way to make DEFINE_GUID emit
+    # definitions, did not work here: it left the identifier undeclared
     # entirely, so knownfolders.h evidently keys off something other than the
     # INITGUID that header sets. Define the one GUID this file needs outright.
     # A plain definition satisfies both shapes: it stands alone if nothing
@@ -1719,7 +1765,7 @@ PLEOF
     # PLATFORM_EXTRACT_VARS_FROM_OS leaves VAR_OS_TYPE alone in its windows
     # branches and relies on the caller defaulting OS_TYPE to VAR_OS. But the
     # build platform is extracted first, and linux sets VAR_OS_TYPE=unix, which
-    # is still set when the target pass runs — so the default never applies and
+    # is still set when the target pass runs, so the default never applies and
     # the target inherits "unix". A windows host never sees this, because there
     # both passes take the same branch. Set it explicitly.
     for f in "$SRC/make/autoconf/platform.m4" "$SRC/common/autoconf/platform.m4"; do
@@ -1734,17 +1780,17 @@ PLEOF
     # globalDefinitions_gcc.hpp is the compiler-family header, picked because the
     # toolchain is clang, and it is written for unix: alloca lives in <malloc.h>
     # on mingw rather than <alloca.h>, and there is no <dlfcn.h> or <pthread.h>
-    # at all —
+    # at all,
     #   fatal error: 'dlfcn.h' file not found
     # hotspot reaches dynamic loading and threads through its os layer on
     # windows, so nothing here needs those two.
     # Guarded separately: 21 includes dlfcn.h and pthread.h but no alloca.h, so
-    # keying both on the alloca include -- as this did -- silently skipped the
+    # keying both on the alloca include, as this did, silently skipped the
     # dlfcn fix there and left the build failing on a header this block exists
     # to remove.
     # jvm.dll links its MSVC-named libraries now, and stops on hotspot's own
     # code: the windows halves of ZGC and XGC call XMemory/ZMemory accessors
-    # without including the headers that define them —
+    # without including the headers that define them,
     #   ld.lld: error: undefined symbol: ZMemory::start() const
     #   >>> referenced by zVirtualMemory_windows.obj:(...PlaceholderCallbacks...)
     # xVirtualMemory_windows.cpp includes xVirtualMemory.hpp, which reaches
@@ -1783,7 +1829,7 @@ PLEOF
     #   error: "missing platform-specific definition here"
     # because windows is expected to have taken globalDefinitions_visCPP.hpp.
     # isnan behaves the same on mingw, so mingw joins the linux branch. Only the
-    # #elif is touched — the #if above it pulls in ucontext.h and friends, which
+    # #elif is touched, the #if above it pulls in ucontext.h and friends, which
     # mingw genuinely lacks and must keep skipping.
     # 21 spells that branch without _AIX (aix has its own header there), so the
     # _AIX half is optional in the pattern; matching only 25's spelling made this
@@ -1797,7 +1843,7 @@ PLEOF
 
     # Same header, the include block: 21 puts <inttypes.h> inside the
     # "#if defined(LINUX) || defined(_ALLBSD_SOURCE)" group, so PRIxPTR is never
-    # defined on a windows target -- globalDefinitions.hpp builds PTR_FORMAT and
+    # defined on a windows target, globalDefinitions.hpp builds PTR_FORMAT and
     # INTPTR_FORMAT out of it, and every use of either becomes a bare identifier:
     #   growableArray.hpp:334: error: expected ')'
     #   array.hpp:152: error: expected ')'
@@ -1819,8 +1865,8 @@ PLEOF
     fi
 
     # Same header again, 21 and older only: everything that is neither linux nor
-    # a BSD gets a block of hand-written "compiler-specific primitive types" —
-    # uint16_t, uint32_t, uint64_t, intptr_t, uintptr_t — left over from the
+    # a BSD gets a block of hand-written "compiler-specific primitive types"
+    # (uint16_t, uint32_t, uint64_t, intptr_t, uintptr_t) left over from the
     # Solaris/Studio days, and it assumes ILP32:
     #   globalDefinitions_gcc.hpp:105: error: typedef redefinition with
     #   different types ('int' vs 'long long')
@@ -1836,12 +1882,12 @@ PLEOF
 
     # Same header, the <math.h> include: mingw follows MSVC in hiding M_PI and
     # the other math constants behind _USE_MATH_DEFINES, while glibc defines them
-    # unconditionally — so the gcc header never asks for them and 21's parallel GC
+    # unconditionally, so the gcc header never asks for them and 21's parallel GC
     # does not get them:
     #   psParallelCompact.cpp:917: error: use of undeclared identifier 'M_PI'
     # globalDefinitions_visCPP.hpp defines _USE_MATH_DEFINES right before its own
     # <math.h> for exactly this reason; do the same on mingw. It lands on 25 as
-    # well, where nothing in hotspot uses M_PI any more — it only makes the
+    # well, where nothing in hotspot uses M_PI any more; it only makes the
     # constants available, so that is a no-op in effect rather than by guard.
     if [ -f "$GD" ] && grep -q '^#include <math.h>$' "$GD" &&
        ! grep -q '_USE_MATH_DEFINES' "$GD"; then
@@ -1861,7 +1907,7 @@ PLEOF
     #   mingw it matches neither exactly:
     #     g1BarrierSetC1.cpp:172: error: call to 'intptrConst' is ambiguous
     #   The !_LP64 branch right below already spells the portable form, for the
-    #   same reason (macos, where intptr_t is not int32_t) — take that branch.
+    #   same reason (macos, where intptr_t is not int32_t), take that branch.
     if [ -f "$GD" ] && grep -q '^    #define NULL_WORD  0L$' "$GD"; then
       perl -0pi -e 's/^  #ifdef _LP64\n    #define NULL_WORD  0L$/  #if defined(_LP64) \&\& !defined(__MINGW32__)\n    #define NULL_WORD  0L/m' "$GD"
       grep -q '^  #if defined(_LP64) && !defined(__MINGW32__)$' "$GD" || {
@@ -1880,7 +1926,7 @@ PLEOF
 
     # jni.h reaches jvm_md.h, which includes <windows.h>, which defines
     # "interface" as a macro for struct. hotspot uses it as an ordinary
-    # identifier -- opto/type.hpp declares a bool parameter called interface --
+    # identifier, opto/type.hpp declares a bool parameter called interface,
     # so the declaration turns into "bool struct" and every call to it then has
     # one argument too many:
     #   type.hpp:958: error: declaration of anonymous struct must be a definition
@@ -1908,16 +1954,16 @@ PLEOF
 
     # CreateWindowsResourceFile compiles the .rc with RC (windres here, fine),
     # then runs the *C compiler* over it a second time purely to list includes
-    # for a dependency file — with -showIncludes -nologo -TC -P -Fi, which the
+    # for a dependency file, with -showIncludes -nologo -TC -P -Fi, which the
     # comment above it admits is misusing CL. clang refuses them:
     #   clang: error: unknown argument: '-showIncludes'
     # The dependency files are only ever -included, so skipping the step costs
     # nothing on a clean build. Keep it for the microsoft toolchain.
-    # Fold llvm-mingw's own runtime -- libunwind, libc++, libwinpthread -- into
+    # Fold llvm-mingw's own runtime, libunwind, libc++, libwinpthread, into
     # each binary, so the JDK does not need those DLLs shipped beside it. This is
     # as static as Windows gets: the CRT itself (msvcrt/ucrtbase) is an OS
     # component, and there is no static archive of it to link. dlopen has no
-    # equivalent problem here — LoadLibrary is a system call, not a libc feature,
+    # equivalent problem here, LoadLibrary is a system call, not a libc feature,
     # so JNI and the rest keep working.
     EXTRA_CONF+=(--with-extra-ldflags=-static)
     ;;
@@ -1957,10 +2003,8 @@ PLEOF
     NDK_DIR="$ROOTDIR/$NDK_NAME"
     if [ ! -d "$NDK_DIR" ]; then
       log "Downloading official NDK ($NDK_NAME)"
-      aria2c --console-log-level=error --check-certificate=false --max-tries=5 \
-        --allow-overwrite=true --auto-file-renaming=false \
-        --dir="$ROOTDIR" -o ndk.zip "https://dl.google.com/android/repository/${NDK_NAME}-linux.zip"
-      unzip -qq "$ROOTDIR/ndk.zip" -d "$ROOTDIR"; rm -f "$ROOTDIR/ndk.zip"
+      fetch_unpack "https://dl.google.com/android/repository/${NDK_NAME}-linux.zip" \
+        "$ROOTDIR/ndk.zip" "$ROOTDIR"
     fi
     TC="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64"
     export CC="$TC/bin/${TARGET}${API}-clang" CXX="$TC/bin/${TARGET}${API}-clang++"
@@ -1972,12 +2016,12 @@ esac
 
 # --- tell configure what the build machine is -------------------------------
 # config.guess probes the *build* system's libc by compiling with $CC, and $CC is
-# a cross compiler here — so it reports the builder as whatever we are targeting:
+# a cross compiler here, so it reports the builder as whatever we are targeting:
 # "x86_64-pc-linux-android" for the android targets, "...-androidx32" for the
 # 32-bit arm one. That is wrong everywhere, and actively breaks any target whose
 # CPU matches the builder: for x86_64-linux-android the bogus build triple equals
 # the host triple, configure concludes "compilation type... native", and host
-# build tools such as adlc get compiled with the NDK compiler — producing android
+# build tools such as adlc get compiled with the NDK compiler, producing android
 # binaries the build itself then tries to run ("adlc: cannot execute: required
 # file not found"). Pass the real build triple so COMPILE_TYPE and every
 #
@@ -1985,60 +2029,29 @@ esac
 # --openjdk-target, because 8, 11 and 17 refuse the two together outright
 # ("Specifying --openjdk-target together with autoconf legacy cross-compilation
 # flags is not supported") while 21 and 25 accept it. Every one of them takes the
-# autoconf set on its own — with a warning, and --openjdk-target expands to
-# exactly this internally — so it is the one spelling that works across all five.
+# autoconf set on its own, with a warning, and --openjdk-target expands to
+# exactly this internally, so it is the one spelling that works across all five.
 # OPENJDK_BUILD_* value are derived correctly.
 BUILD_TRIPLE="$(gcc -dumpmachine 2>/dev/null || clang -dumpmachine 2>/dev/null || true)"
 [ -n "$BUILD_TRIPLE" ] || { echo "cannot determine the build triple (no gcc/clang?)" >&2; exit 1; }
 EXTRA_CONF+=(--build="$BUILD_TRIPLE")
 
 # --- sound: ALSA out, miniaudio in ------------------------------------------
-# OpenJDK demands ALSA for every OPENJDK_TARGET_OS=linux build and links its sound
-# native lib against -lasound, so configure dies with "Could not find alsa!" —
-# none of the cross sysroots here carry ALSA, and bionic has no ALSA at all.
-# Termux works around this by packaging alsa-lib for Android and pointing
-# configure at it; with no equivalent sysroot for any target, libjsound is built
-# against miniaudio instead (src/libjsound/PLATFORM_API_MiniAudio_PCM.c).
-# miniaudio declares the backend symbols itself and resolves whatever the
-# machine actually has at run time — PulseAudio, ALSA, JACK, sndio, audio(4),
-# OSS, AAudio/OpenSL ES, WASAPI/DirectSound/WinMM, Core Audio — so nothing has to
-# be found at build time and one implementation covers every target.
+# miniaudio (src/libjsound/PLATFORM_API_MiniAudio_PCM.c) is the PCM provider on
+# every platform: it needs nothing at build time and picks a backend at run time.
+# Per platform:
+#   linux/android  no sysroot has ALSA, bionic has none. Ports and MIDI go too:
+#                  the ALSA sources implementing them include <alsa/asoundlib.h>.
+#   bsd            OpenJDK has no BSD sound sources at all, but still builds
+#                  libjsound with USE_DAUDIO=TRUE, so DAUDIO_* goes undefined.
+#                  No native ports/MIDI to keep either.
+#   windows/macosx nothing missing; one PCM implementation instead of five. Only
+#                  the platform PCM file is dropped, so native ports and MIDI stay.
+# 8 is linux-only: its makefile lists sources per OS and its windows port does not
+# build yet.
 #
-# It is the PCM (DirectAudio) provider on every platform, for three different
-# reasons per platform:
-#
-#   linux/android  ALSA cannot be built against here at all (no sysroot carries
-#                  it, bionic has none). Ports and MIDI go with it, because the
-#                  ALSA sources implementing them include <alsa/asoundlib.h> and
-#                  cannot stay in the build.
-#   bsd            OpenJDK has no BSD sound sources whatsoever — src/java.desktop/bsd
-#                  has no native/ directory — while Lib.gmk still builds libjsound
-#                  for every OS but aix with USE_DAUDIO=TRUE, so the shared
-#                  DirectAudioDevice.c calls DAUDIO_* that nothing defines. This
-#                  gives the BSDs a PCM backend for the first time; there is no
-#                  native ports or MIDI implementation to keep, so those stay off.
-#   windows/macosx nothing is missing here — the point is one PCM implementation
-#                  across all targets rather than five. Only the platform PCM file
-#                  is dropped (PLATFORM_API_WinOS_DirectSound.cpp,
-#                  PLATFORM_API_MacOSX_PCM.cpp — both verified self-contained, no
-#                  other file in either directory references a symbol they
-#                  define). The native ports and MIDI providers are KEPT, so
-#                  javax.sound.midi keeps CoreMIDI/WinMM and the mixer controls
-#                  keep working; only the bytes move through miniaudio.
-#
-# So javax.sound.sampled gets playback and capture everywhere, and javax.sound.midi
-# keeps its platform devices on windows and macOS while falling back to the
-# pure-Java software synth on linux, android and the BSDs.
-#
-# 8 is linux-only here: its sound makefile lists sources explicitly per OS and its
-# windows port does not build yet, so 8 on windows/macOS keeps its native PCM —
-# which costs nothing, since those are the platforms where the native one works.
-# Edits go into the fetched source tree and are keyed to text that is stable
-# across the supported feature versions.
-#
-# Fetch the pinned miniaudio header once and put it, and the backend, into the
-# platform sound source directory the build compiles from -- 8 and 11+ disagree
-# on where that is, so the caller passes it in.
+# Copy the pinned header and the backend into the platform sound source directory;
+# 8 and 11+ disagree on where that is, so the caller passes it in.
 install_miniaudio() {
   local dest="$1" header="$BUILD_DIR/miniaudio-$MINIAUDIO_VERSION/miniaudio.h"
 
@@ -2048,17 +2061,14 @@ install_miniaudio() {
   if [ ! -f "$header" ]; then
     log "Downloading miniaudio $MINIAUDIO_VERSION (libjsound PCM backend)"
     mkdir -p "$(dirname "$header")"
-    aria2c --console-log-level=error --check-certificate=false --max-tries=5 \
-      --allow-overwrite=true --auto-file-renaming=false \
-      --dir="$(dirname "$header")" -o miniaudio.h \
+    fetch --dir="$(dirname "$header")" -o miniaudio.h \
       "https://raw.githubusercontent.com/mackron/miniaudio/$MINIAUDIO_VERSION/miniaudio.h"
   fi
   cp "$header" "$dest/miniaudio.h"
   cp "$MINIAUDIO_BACKEND" "$dest/"
 }
 
-# The libjsound makefile on 11+: 11 keeps the rules in make/lib/, 17+ in
-# make/modules/.
+# The libjsound makefile on 11+: 11 in make/lib/, 17+ in make/modules/.
 jsound_makefile() {
   local gmk="$SRC/make/modules/java.desktop/Lib.gmk"
   [ -f "$gmk" ] || gmk="$SRC/make/lib/Lib-java.desktop.gmk"
@@ -2066,10 +2076,9 @@ jsound_makefile() {
   printf '%s\n' "$gmk"
 }
 
-# Drop the platform PCM sources from libjsound (11+). No release carries an
-# EXCLUDE_FILES in that SetupJdkLibrary call for any platform, so this is always
-# an insertion, and the values are basenames because EXCLUDE_FILES matches on
-# the file name rather than the path.
+# Drop platform sources from libjsound (11+). No release has an EXCLUDE_FILES
+# there, so this is always an insertion; values are basenames, which is what
+# EXCLUDE_FILES matches on.
 jsound_exclude() {
   local gmk="$1" files="$2"
   awk -v excl="$files" '
@@ -2093,7 +2102,7 @@ if [ "$TARGET_OS" = linux ]; then
     # 8: ALSA lives in its own libjsoundalsa, pulled in only when the makefile
     # adds jsoundalsa to EXTRA_SOUND_JNI_LIBS. Rather than keep a second library
     # alive, fold the miniaudio provider straight into libjsound the way macosx
-    # and solaris already fold in their own platform PCM files — libjsound's
+    # and solaris already fold in their own platform PCM files, libjsound's
     # mapfile already exports the DirectAudioDevice natives for exactly that
     # reason, so no symbol plumbing has to move. 8 is also the one version
     # shipping a checked-in generated-configure.sh, so ALSA_NOT_NEEDED goes into
@@ -2188,29 +2197,24 @@ elif [ "$JDK_VERSION" != 8 ]; then
   case "$TARGET_OS" in
     bsd)
       log "Building libjsound against miniaudio (the BSDs ship no sound sources)"
-      # Nothing to replace here, only a hole to fill: there is no
-      # src/java.desktop/bsd/native at all. FindSrcDirsForLib wildcards
+      # Nothing to replace, only a hole to fill. FindSrcDirsForLib wildcards
       # src/<module>/$(OPENJDK_TARGET_OS)/native/lib<name>, so creating the
-      # directory is all it takes for these two files to be compiled in --
-      # which also means install_miniaudio's "is the directory there" check
-      # cannot serve as the spell-check on the path it does elsewhere.
+      # directory is enough to get both files compiled in.
       JSOUND_SRC="$SRC/src/java.desktop/bsd/native/libjsound"
       mkdir -p "$JSOUND_SRC"
       install_miniaudio "$JSOUND_SRC"
 
       JSOUND_GMK="$(jsound_makefile)"
       if ! grep -q 'LIBS_bsd :=' "$JSOUND_GMK"; then
-        # Ports and MIDI have no BSD implementation to keep, and leaving them on
-        # would leave the PORT_*/MIDI_* the shared code calls undefined.
+        # No BSD ports/MIDI to keep; leaving them on leaves PORT_*/MIDI_* undefined.
         sed -i \
           -e 's/-DUSE_PORTS=TRUE/-DUSE_PORTS=FALSE/' \
           -e 's/-DUSE_PLATFORM_MIDI_OUT=TRUE/-DUSE_PLATFORM_MIDI_OUT=FALSE/' \
           -e 's/-DUSE_PLATFORM_MIDI_IN=TRUE/-DUSE_PLATFORM_MIDI_IN=FALSE/' \
           "$JSOUND_GMK"
-        # miniaudio needs libm and threads; the BSDs keep dlopen in libc, so
-        # unlike linux there is no -ldl to add.
-        # awk, not sed: this sed writes a literal \n rather than a line break in
-        # the replacement, which silently merges LIBS_bsd into the line below it.
+        # miniaudio needs libm and threads; dlopen is in libc on the BSDs, so
+        # there is no -ldl to add. awk, not sed: this sed writes a literal \n
+        # rather than a line break, silently merging LIBS_bsd into the next line.
         awk '
           !done && index($0, "LIBS_linux := $(ALSA_LIBS),") {
             match($0, /^[[:space:]]*/)
@@ -2222,18 +2226,16 @@ elif [ "$JDK_VERSION" != 8 ]; then
         ' "$JSOUND_GMK" > "$JSOUND_GMK.tmp" || {
           echo "unexpected $JSOUND_GMK: no LIBS_linux to anchor LIBS_bsd to" >&2; exit 1; }
         mv "$JSOUND_GMK.tmp" "$JSOUND_GMK"
-        # -F, and with the trailing backslash in the pattern: the continuation is
-        # the part that matters (without it the next line is swallowed), and this
-        # grep will not match a "\\$" in a basic regexp.
+        # -F with the trailing backslash: the continuation is what matters, and
+        # this grep will not match a "\\$" in a basic regexp.
         grep -qF 'LIBS_bsd := -lm -lpthread, \' "$JSOUND_GMK" || {
           echo "failed to add LIBS_bsd to libjsound in $JSOUND_GMK" >&2; exit 1; }
       fi
       ;;
     macosx|windows)
-      # The native PCM file steps aside and everything else in the directory
-      # stays, so CoreMIDI / WinMM MIDI and the mixer ports are untouched. Both
-      # files keep their non-DAUDIO helpers to themselves -- checked against
-      # every other source in both directories -- so nothing dangles.
+      # Only the PCM file goes; the rest of the directory stays, so CoreMIDI /
+      # WinMM MIDI and the mixer ports are untouched. Both keep their non-DAUDIO
+      # helpers to themselves, checked against every other source there.
       if [ "$TARGET_OS" = macosx ]; then
         JSOUND_SRC="$SRC/src/java.desktop/macosx/native/libjsound"
         JSOUND_PCM=PLATFORM_API_MacOSX_PCM.cpp
@@ -2248,10 +2250,10 @@ elif [ "$JDK_VERSION" != 8 ]; then
         echo "unexpected $JSOUND_SRC: no $JSOUND_PCM to replace" >&2; exit 1; }
 
       JSOUND_GMK="$(jsound_makefile)"
-      # The library list already carries what miniaudio resolves against on both
-      # -- CoreAudio/AudioToolbox on macOS, ole32 for WASAPI on windows -- so
-      # only the source swap is needed. USE_PORTS and USE_PLATFORM_MIDI_* stay
-      # TRUE here, unlike every other platform.
+      # The library list already carries what miniaudio resolves against
+      # (CoreAudio/AudioToolbox on macOS, ole32 for WASAPI on windows), so only
+      # the source swap is needed. USE_PORTS and USE_PLATFORM_MIDI_* stay TRUE
+      # here, unlike every other platform.
       grep -q "EXCLUDE_FILES := $JSOUND_PCM" "$JSOUND_GMK" ||
         jsound_exclude "$JSOUND_GMK" "$JSOUND_PCM"
       ;;
@@ -2263,7 +2265,7 @@ fi
 # and the librt entry in BASIC_JVM_LIBS), and jdk8's makefiles hardcode -lpthread
 # in several more places. bionic ships neither library: pthreads and the POSIX
 # timers are part of libc. Rather than patch every reference in every release,
-# put empty archives with those names on the link path — the linker resolves the
+# put empty archives with those names on the link path, the linker resolves the
 # flags, they contribute nothing, and the symbols come from libc as intended.
 if [ "$PLATFORM" = android ]; then
   STUB_DIR="$BUILD_DIR/bionic-stubs/$TARGET"
@@ -2280,7 +2282,7 @@ if [ "$PLATFORM" = android ]; then
   #   ld.lld: error: version script assignment of 'local' to symbol '_fini'
   #   failed: symbol not defined
   # The flag restores the older lenient behaviour for symbols that aren't there,
-  # leaving the script's meaning intact for every symbol that is — cheaper than
+  # leaving the script's meaning intact for every symbol that is, cheaper than
   # patching version-script-clang.txt in each release.
   EXTRA_CONF+=(--with-extra-ldflags="-L$STUB_DIR -Wl,--undefined-version")
 
@@ -2289,8 +2291,8 @@ if [ "$PLATFORM" = android ]; then
   # starts:
   #   WARNING: linker: ... unused DT entry: DT_RPATH (type 0xf arg 0xcf) (ignoring)
   #   CANNOT LINK EXECUTABLE "./java": library "libjli.so" not found
-  # OpenJDK asks for it deliberately -- RPATH outranks LD_LIBRARY_PATH, so the
-  # JDK's internal dependencies cannot be hijacked (JDK-8326891) -- but on
+  # OpenJDK asks for it deliberately, RPATH outranks LD_LIBRARY_PATH, so the
+  # JDK's internal dependencies cannot be hijacked (JDK-8326891), but on
   # android the choice is between RUNPATH and nothing. Drop the flag for these
   # builds only; the linux ones keep RPATH and that protection. 8 never passes
   # it, and lld defaults to the new tags, so it has no file to edit here.
@@ -2305,8 +2307,8 @@ if [ "$PLATFORM" = android ]; then
   # aarch64: 11 keeps the TLSDESC thread-pointer helper in a lowercase .s, which
   # the compiler never preprocesses, so unlike 17+ it cannot be guarded with
   # #ifndef __ANDROID__ from inside. Excluding it through the makefiles did not
-  # take either -- the libjvm object count was unchanged with JVM_EXCLUDE_FILES
-  # set -- so remove the file, which is unambiguous. Patch 0015 supplies the
+  # take either, the libjvm object count was unchanged with JVM_EXCLUDE_FILES
+  # set, so remove the file, which is unambiguous. Patch 0015 supplies the
   # aarch64_get_thread_helper() the assembly would have defined. Nothing else
   # references it, and only aarch64 targets ever compile it.
   TLSDESC_S="$SRC/src/hotspot/os_cpu/linux_aarch64/threadLS_linux_aarch64.s"
@@ -2322,7 +2324,7 @@ if [ "$PLATFORM" = android ]; then
   # hotspot makefiles are handed no libc information at all, so do it here where
   # the platform is known. Two edits: stop saproc.make building the library, and
   # take it out of the export list, which demands it whether or not anything
-  # built it. Only the libsaproc entry goes -- ADD_SA_BINARIES also names
+  # built it. Only the libsaproc entry goes, ADD_SA_BINARIES also names
   # sa-jdi.jar, which is pure Java, builds from sa.make regardless, and is what
   # the images stage goes looking for:
   #   No rule to make target '.../jdk/lib/sa-jdi.jar', needed by
@@ -2347,7 +2349,7 @@ fi
 # --- libffi (Zero only) -----------------------------------------------------
 # Zero calls native code through libffi, and configure requires it whenever the
 # variant is zero (libraries.m4: NEEDS_LIB_FFI). Unlike cups/fontconfig this one
-# is genuinely linked — lib-ffi.m4 sets LIBFFI_LIBS=-lffi — and no cross sysroot
+# is genuinely linked, lib-ffi.m4 sets LIBFFI_LIBS=-lffi, and no cross sysroot
 # here ships it, so build it from source for the target.
 #   --with-pic + static: libffi ends up inside libjvm.so, so its objects must be
 #   position independent; linking it statically also means the finished JDK has
@@ -2362,13 +2364,9 @@ if [ "$JVM_VARIANT" = zero ]; then
     log "Cross-building libffi $LIBFFI_VERSION for $TARGET (needed by Zero)"
     FFI_SRC="$BUILD_DIR/libffi/src-$LIBFFI_VERSION"
     if [ ! -d "$FFI_SRC" ]; then
-      mkdir -p "$FFI_SRC"
-      aria2c --console-log-level=error --check-certificate=false --max-tries=5 \
-        --allow-overwrite=true --auto-file-renaming=false \
-        --dir="$BUILD_DIR/libffi" -o libffi.tar.gz \
-        "https://github.com/libffi/libffi/releases/download/v${LIBFFI_VERSION}/libffi-${LIBFFI_VERSION}.tar.gz"
-      tar -xzf "$BUILD_DIR/libffi/libffi.tar.gz" -C "$FFI_SRC" --strip-components=1
-      rm -f "$BUILD_DIR/libffi/libffi.tar.gz"
+      fetch_unpack \
+        "https://github.com/libffi/libffi/releases/download/v${LIBFFI_VERSION}/libffi-${LIBFFI_VERSION}.tar.gz" \
+        "$BUILD_DIR/libffi/libffi.tar.gz" "$FFI_SRC" --strip-components=1
     fi
     FFI_BUILD="$BUILD_DIR/libffi/build-$TARGET"
     rm -rf "$FFI_BUILD"; mkdir -p "$FFI_BUILD"
@@ -2385,7 +2383,7 @@ if [ "$JVM_VARIANT" = zero ]; then
   # 8 has no --with-libffi-include/--with-libffi-lib; its configure only does
   # PKG_CHECK_MODULES([LIBFFI], [libffi]) and would reject them outright
   # ("configure: error: unrecognized options"). Point pkg-config at the libffi
-  # just built instead — the .pc file installed alongside it carries the same
+  # just built instead, the .pc file installed alongside it carries the same
   # include and lib paths those options would have named.
   if [ "$JDK_VERSION" = 8 ]; then
     [ -f "$FFI_PREFIX/lib/pkgconfig/libffi.pc" ] || {
@@ -2399,7 +2397,7 @@ fi
 # --- headers-only deps (cups, fontconfig, X11) ------------------------------
 # configure requires both for every target except windows/macosx (NEEDS_LIB_CUPS
 # / NEEDS_LIB_FONTCONFIG), and --enable-headless-only does not exempt them:
-# libawt_headless compiles CUPSfuncs.c and fontpath.c. Neither is ever linked —
+# libawt_headless compiles CUPSfuncs.c and fontpath.c. Neither is ever linked,
 # configure exports only CUPS_CFLAGS / FONTCONFIG_CFLAGS (no *_LIBS exists), and
 # both libraries are dlopened at run time (libcups.so.2 from CUPSfuncs.c,
 # libfontconfig.so.1 from fontpath.c). So the headers are all the build needs, and
@@ -2408,8 +2406,8 @@ fi
 # target's own libc headers and shadow them.
 #
 # X11 rides along for the same reason. 11, 17 and 21 all compile libawt against
-# it whatever --enable-headless-only says — rect.h pulls in <X11/Xlib.h>, so the
-# build stops with "fatal error: 'X11/Xlib.h' file not found" — while only the
+# it whatever --enable-headless-only says, rect.h pulls in <X11/Xlib.h>, so the
+# build stops with "fatal error: 'X11/Xlib.h' file not found", while only the
 # headful libawt_xawt, which a headless build never produces, links against the
 # libraries. 25 dropped the include and needs none of this; the extra -I is
 # harmless there. Passing -I directly rather than through --x-includes is what
@@ -2427,7 +2425,7 @@ if [ "$TARGET_OS" = linux ] || [ "$TARGET_OS" = bsd ]; then
   done
   # 8 has no --disable-warnings-as-errors. Patch 0003 empties hotspot's own
   # -Werror, but the JDK-side native libraries carry their own, and bionic
-  # differs from glibc in ways that trip it — socklen_t is signed there, so
+  # differs from glibc in ways that trip it, socklen_t is signed there, so
   # SctpNet.c fails on -Wpointer-sign. Turn errors back into warnings, matching
   # what every other release here is configured with.
   EXTRA_CFLAGS="-I$DEP_INC"
@@ -2438,7 +2436,7 @@ fi
 
 # --- a config.sub that knows android ----------------------------------------
 # 8, 11 and 17 ship an autoconf-config.sub from 2008, which predates android and
-# rejects every triple built here — configure stops at "checking host system
+# rejects every triple built here, configure stops at "checking host system
 # type" with "Invalid configuration `x86_64-linux-android': system `android' not
 # recognized". 21 and 25 carry a 2022 copy that resolves all of them. Swap the
 # stale file for that same known-good one, and only when the tree's own copy
@@ -2451,9 +2449,7 @@ if [ -f "$CONFIG_SUB_DIR/config.sub" ] \
   CONFIG_SUB_CACHE="$BUILD_DIR/autoconf-config.sub"
   if [ ! -f "$CONFIG_SUB_CACHE" ]; then
     mkdir -p "$BUILD_DIR"
-    aria2c --console-log-level=error --check-certificate=false --max-tries=5 \
-      --allow-overwrite=true --auto-file-renaming=false \
-      --dir="$BUILD_DIR" -o autoconf-config.sub "$CONFIG_SUB_URL"
+    fetch --dir="$BUILD_DIR" -o autoconf-config.sub "$CONFIG_SUB_URL"
   fi
   cp "$CONFIG_SUB_CACHE" "$CONFIG_SUB_DIR/autoconf-config.sub"
   bash "$CONFIG_SUB_DIR/config.sub" "$TARGET" >/dev/null 2>&1 || {
@@ -2514,7 +2510,7 @@ common_conf=(
 # headless-only is a unix idea: it exists to build without X11, and windows and
 # macosx have their toolkits either way, so configure refuses the flag outright
 # ("headless-only is not supported on macOS and Windows"). Ask for it only where
-# it means something — which is also where the missing X11/ALSA sysroots make it
+# it means something, which is also where the missing X11/ALSA sysroots make it
 # necessary.
 case "$TARGET_OS" in
   windows|macosx) ;;
@@ -2547,7 +2543,7 @@ export USER=builder
 log "Configuring JDK $JDK_VERSION for $TARGET ($JVM_VARIANT, $TARGET_OS)"
 cd "$SRC"
 if [ "$JDK_VERSION" = 8 ]; then
-  # jdk8u: legacy build system — the option set is smaller and spelled
+  # jdk8u: legacy build system, the option set is smaller and spelled
   # differently, but the intent matches common_conf above.
   # --disable-headful: 8's spelling of --enable-headless-only; it also sets
   # X11_NOT_NEEDED, so configure stops looking for X11 headers no cross sysroot
@@ -2559,7 +2555,7 @@ if [ "$JDK_VERSION" = 8 ]; then
   # --with-build-user exists yet in 8, and configure makes unknown options fatal,
   # so both are left off. BUILD_CC/BUILD_CXX matter more here than on 11+:
   # hotspot-spec.gmk.in maps BUILD_CXX onto hotspot's HOSTCXX, which builds adlc
-  # — and hotspot hands that host tool the *target* compiler's flags, so with the
+  #, and hotspot hands that host tool the *target* compiler's flags, so with the
   # NDK clang as CXX it adds -flimit-debug-info and host g++ refuses it
   # ("g++: error: unrecognized command-line option '-flimit-debug-info'").
   # Building adlc with clang too keeps the flags and the compiler in agreement.
@@ -2596,7 +2592,7 @@ if [ "$JDK_VERSION" = 8 ]; then
   # BUILD_HEADLESS:=true into spec.gmk, but Awt2dLibraries.gmk,
   # CompileLaunchers.gmk and CompileJavaClasses.gmk all gate on
   # BUILD_HEADLESS_ONLY, which nothing ever sets. So libawt_xawt gets built
-  # regardless — it wants glibc's <execinfo.h> backtrace(), which bionic has
+  # regardless, it wants glibc's <execinfo.h> backtrace(), which bionic has
   # no equivalent of, and it would then try to link the X11 libraries this
   # repository only stages headers for. Set the variable the makefiles are
   # actually looking for.
