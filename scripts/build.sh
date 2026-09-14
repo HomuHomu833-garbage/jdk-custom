@@ -1093,6 +1093,37 @@ EOF
       log "Leaving ARFLAGS empty for the mingw archiver"
     fi
 
+    # Same file, 11 only: the version-info defines for the resource compiler sit
+    # inside the microsoft branch, so a clang build gets an empty RC_FLAGS and
+    # the .rc keeps a bare token where a number belongs:
+    #   llvm-rc: Error parsing file: expected '-', '~', integer or '(', got JDK_VER
+    # 17 and later moved those defines into JdkNativeCompilation.gmk, outside any
+    # toolchain test, which is why only 11 breaks. Do the same here by keying the
+    # block on the target OS and leaving only the two cl.exe switches behind,
+    # which windres does not accept.
+    if [ -f "$ARF" ] && grep -q '^    RC_FLAGS="-nologo -l0x409"$' "$ARF"; then
+      awk '
+        $0 == "  # On Windows, we need to set RC flags." { print; inrc = 1; next }
+        inrc && $0 == "  if test \"x$TOOLCHAIN_TYPE\" = xmicrosoft; then" {
+          print "  if test \"x$OPENJDK_TARGET_OS\" = xwindows; then"
+          next
+        }
+        inrc && $0 == "    RC_FLAGS=\"-nologo -l0x409\"" {
+          print "    if test \"x$TOOLCHAIN_TYPE\" = xmicrosoft; then"
+          print "      RC_FLAGS=\"-nologo -l0x409\""
+          print "      JVM_RCFLAGS=\"-nologo\""
+          print "    fi"
+          drop_jvm = 1
+          next
+        }
+        drop_jvm && $0 == "    JVM_RCFLAGS=\"-nologo\"" { drop_jvm = 0; next }
+        { print }
+      ' "$ARF" > "$ARF.tmp" && mv "$ARF.tmp" "$ARF"
+      grep -q '^  if test "x\$OPENJDK_TARGET_OS" = xwindows; then$' "$ARF" || {
+        echo "failed to give the mingw resource compiler its version defines" >&2; exit 1; }
+      log "Defining the version-info macros for the mingw resource compiler"
+    fi
+
     # sspi.cpp is C written as C++, and MSVC lets both of these pass where clang
     # does not:
     #   sspi.cpp:58: error: invalid suffix on literal; C++11 requires a space
