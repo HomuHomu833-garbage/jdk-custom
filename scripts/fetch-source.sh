@@ -1245,7 +1245,11 @@ PLEOF
     PJ="$awt_dir/awt_PrintJob.cpp"
     pj_eps='    const double epsilon = 0.10;'
     pj_goto='    JNI_CHECK_NULL_GOTO(printDC, "Invalid printDC", done);'
-    if [ -f "$PJ" ] && grep -qxF "$pj_eps" "$PJ" &&
+    # Both lines have to be there before the line numbers are compared: 21 and 25
+    # keep the constant but check printDC explicitly instead of through the
+    # macro, so the second grep comes back empty and the comparison would be
+    # "[: : integer expression expected".
+    if [ -f "$PJ" ] && grep -qxF "$pj_eps" "$PJ" && grep -qxF "$pj_goto" "$PJ" &&
        [ "$(grep -nxF "$pj_eps" "$PJ" | cut -d: -f1)" -gt "$(grep -nxF "$pj_goto" "$PJ" | cut -d: -f1)" ]; then
       EPS="$pj_eps" GOTO="$pj_goto" perl -0777 -i -pe '
         my ($e, $g) = ($ENV{EPS} . "\n", $ENV{GOTO} . "\n");
