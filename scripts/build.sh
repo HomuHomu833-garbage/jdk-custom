@@ -1124,6 +1124,44 @@ EOF
       log "Defining the version-info macros for the mingw resource compiler"
     fi
 
+    # 11 only, and both are the same LLP64 story as 21's NULL_WORD.
+    #
+    # 11 spells the windows JNI types as MSVC extensions, "long" and "__int64";
+    # 17 moved them to "int" and "long long" and every release since has kept
+    # that. It matters because jint as long is neither int32_t (int) nor
+    # intptr_t (long long) on win64, so a jint argument sits exactly between the
+    # two movptr overloads that exist, as the header puts it, "so that int32_t
+    # and intptr_t are not the same and we have ambiguous declarations":
+    #   c1_LIRAssembler_x86.cpp:617: error: call to member function 'movptr' is
+    #   ambiguous
+    # Backport 17's spelling. Both types keep their width on windows, so this is
+    # the same ABI, which is why upstream could make the change at all.
+    JNIMD="$SRC/src/java.base/windows/native/include/jni_md.h"
+    if [ -f "$JNIMD" ] && grep -q '^typedef long jint;$' "$JNIMD"; then
+      sed -i -e 's/^typedef long jint;$/typedef int jint;/' \
+             -e 's/^typedef __int64 jlong;$/typedef long long jlong;/' "$JNIMD"
+      grep -q '^typedef int jint;$' "$JNIMD" && grep -q '^typedef long long jlong;$' "$JNIMD" || {
+        echo "failed to backport 17's jni_md.h types to 11" >&2; exit 1; }
+      log "Spelling 11's windows JNI types the way 17 does (jint int, jlong long long)"
+    fi
+
+    # count_trailing_zeros picks its implementation by toolchain, and the gcc
+    # branch assumes unsigned long is as wide as uintx, true on LP64 and false on
+    # win64, where it is half the width:
+    #   count_trailing_zeros.hpp:44: error: implicit instantiation of undefined
+    #   template 'STATIC_ASSERT_FAILURE<false>'
+    # __builtin_ctzl would also truncate. 17 restructured the whole header into
+    # width-explicit _32 and _64 helpers, which drags its callers along, so keep
+    # 11's shape and take the long long builtin on mingw. Zero-extending a
+    # narrower x cannot change a trailing-zero count for x != 0.
+    CTZ="$SRC/src/hotspot/share/utilities/count_trailing_zeros.hpp"
+    if [ -f "$CTZ" ] && grep -q '^  STATIC_ASSERT(sizeof(unsigned long) == sizeof(uintx));$' "$CTZ"; then
+      perl -0pi -e 's/^  STATIC_ASSERT\(sizeof\(unsigned long\) == sizeof\(uintx\)\);\n(  assert\(x != 0, "precondition"\);\n)  return __builtin_ctzl\(x\);$/#ifdef __MINGW32__\n  STATIC_ASSERT(sizeof(unsigned long long) >= sizeof(uintx));\n$1  return __builtin_ctzll(x);\n#else\n  STATIC_ASSERT(sizeof(unsigned long) == sizeof(uintx));\n$1  return __builtin_ctzl(x);\n#endif/m' "$CTZ"
+      grep -q '__builtin_ctzll' "$CTZ" || {
+        echo "failed to widen count_trailing_zeros for mingw" >&2; exit 1; }
+      log "Counting trailing zeros with the long long builtin on mingw"
+    fi
+
     # sspi.cpp is C written as C++, and MSVC lets both of these pass where clang
     # does not:
     #   sspi.cpp:58: error: invalid suffix on literal; C++11 requires a space
