@@ -998,6 +998,30 @@ EOF
       log "Emitting import libraries the mingw way, and not for the build tools"
     fi
 
+    # jdk.pack keys its whole windows block on _MSC_VER, so mingw takes the unix
+    # branch and gets the two-argument mkdir:
+    #   utils.cpp:75: error: no matching function for call to 'mkdir'
+    # Only MKDIR is touched. The rest of that branch (PATH_MAX, strcasecmp,
+    # dup2) is fine on mingw, while the MSVC side spells things mingw would have
+    # to be checked for one by one. 14 deleted jdk.pack, so this is 11 and 8.
+    PACKDEF="$SRC/src/jdk.pack/share/native/common-unpack/defines.h"
+    if [ -f "$PACKDEF" ] && grep -q '^#define MKDIR(dir) mkdir(dir, 0777);$' "$PACKDEF"; then
+      awk '
+        $0 == "#define MKDIR(dir) mkdir(dir, 0777);" {
+          print "#ifdef _WIN32"
+          print "#define MKDIR(dir) mkdir(dir)"
+          print "#else"
+          print $0
+          print "#endif"
+          next
+        }
+        { print }
+      ' "$PACKDEF" > "$PACKDEF.tmp" && mv "$PACKDEF.tmp" "$PACKDEF"
+      grep -q '^#define MKDIR(dir) mkdir(dir)$' "$PACKDEF" || {
+        echo "failed to give jdk.pack the one-argument mkdir" >&2; exit 1; }
+      log "Using the one-argument mkdir in jdk.pack"
+    fi
+
     # mlib_sys.c picks its aligned allocator with #if defined(_MSC_VER), and
     # everything else gets the unix branch:
     #   mlib_sys.c:85: error: call to undeclared function 'memalign'
@@ -1434,12 +1458,13 @@ PLEOF
     # object for the linker to act on. clang emits no such directive outside
     # its MSVC-compatible driver, so name the library where the others are
     # named.
-    # Both makefile shapes: 25 keeps libawt in AwtLibraries.gmk with the library
-    # list alphabetised, 21 keeps it in Awt2dLibraries.gmk in a different order,
-    # so matching 25's first two entries silently did nothing on 21. Anchor on
-    # the libawt setup and its own LIBS_windows instead of on the flag order.
+    # Three makefile shapes: 25 has AwtLibraries.gmk, 17 and 21
+    # modules/java.desktop/lib/Awt2dLibraries.gmk, 11 make/lib/Awt2dLibraries.gmk.
+    # All three spell the setup the same, so anchor on that and its own
+    # LIBS_windows rather than on a filename or the flag order.
     for AWL in "$SRC/make/modules/java.desktop/lib/AwtLibraries.gmk" \
-               "$SRC/make/modules/java.desktop/lib/Awt2dLibraries.gmk"; do
+               "$SRC/make/modules/java.desktop/lib/Awt2dLibraries.gmk" \
+               "$SRC/make/lib/Awt2dLibraries.gmk"; do
       [ -f "$AWL" ] || continue
       grep -q 'oleaut32.lib' "$AWL" && continue
       awk '
