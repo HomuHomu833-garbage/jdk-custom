@@ -83,10 +83,12 @@ fi
 # yields a runnable JDK. loongarch64 has an upstream HotSpot port from 21 on.
 case "$ARCH" in
   i686|x86)
-    # 25 dropped the 32-bit x86 JIT: basic.m4 errors out with "32-bit x86 builds
-    # are not supported" unless the variant is zero. Older releases still have it.
-    if [ "$JDK_VERSION" -ge 25 ] 2>/dev/null; then JVM_VARIANT=zero; else JVM_VARIANT=server; fi ;;
-  arm|armeb|armhf|armv7a|thumb|thumbeb)
+    # JEP 503 deleted the 32-bit x86 port in 25, so configure there stops at
+    # "32-bit x86 builds are not supported" until that port is restored. Zero
+    # would get past it, but an interpreter-only JDK is not what this target is
+    # for, so let it fail where the real work is rather than degrade quietly.
+    JVM_VARIANT=server ;;
+  arm|armeb|armhf|armv7|armv7a|thumb|thumbeb)
     # 8 has no 32-bit ARM HotSpot to build: jdk8u mainline ships cpu ports for
     # aarch64, ppc, sparc, x86 and zero only, JDK 8's ARM32 JIT lived in
     # Oracle's separate arm-port forest and never landed here. Left on server it
@@ -94,7 +96,7 @@ case "$ARCH" in
     # ("unsupported argument 'i586' to option '-march='"). 11+ carry
     # src/hotspot/cpu/arm, so they keep the JIT.
     if [ "$JDK_VERSION" = 8 ]; then JVM_VARIANT=zero; else JVM_VARIANT=server; fi ;;
-  aarch64|aarch64_be|arm64|arm64e|powerpc64|powerpc64le|ppc64|ppc64le|riscv64|s390x|x86_64|x86_64h)
+  aarch64|aarch64_be|arm64|arm64e|arm64ec|powerpc64|powerpc64le|ppc64|ppc64le|riscv64|s390x|x86_64|x86_64h)
     JVM_VARIANT=server ;;
   loongarch64)
     if [ "$JDK_VERSION" -ge 21 ] 2>/dev/null; then JVM_VARIANT=server; else JVM_VARIANT=zero; fi ;;
@@ -504,14 +506,24 @@ if [ "$TARGET_OS" = linux ] || [ "$TARGET_OS" = bsd ]; then
 fi
 
 # --- configure --------------------------------------------------------------
+# autoconf has never heard of arm64ec: config.sub rejects the triple outright and
+# platform.m4 would fold it into 32-bit arm, since only "aarch64" matches exactly
+# and "arm*" catches the rest. ARM64EC is an ABI on ARM64, not a CPU, so the tree
+# is configured as aarch64 and the arm64ec-prefixed compiler decides the ABI.
+# Only the triple handed to autoconf changes; CC and the build directory keep the
+# real one.
+CONF_TRIPLE="$TARGET"
+case "$ARCH" in
+  arm64ec) CONF_TRIPLE="aarch64-${TARGET#*-}" ;;
+esac
 CONF="custom-$TARGET"
 IMAGE_DIR="$SRC/build/$CONF/images/jdk"
 
 # Flags common to every modern (11+) configure. Bundled libs keep the build
 # self-contained per target; headless-only drops the X11/CUPS desktop deps.
 common_conf=(
-  --host="$TARGET"
-  --target="$TARGET"
+  --host="$CONF_TRIPLE"
+  --target="$CONF_TRIPLE"
   --with-boot-jdk="$BOOT_JDK"
   --with-build-jdk="$BOOT_JDK"
   --with-jvm-variants="$JVM_VARIANT"
@@ -599,8 +611,8 @@ if [ "$JDK_VERSION" = 8 ]; then
     *) conf8_headful=(--disable-headful) ;;
   esac
   bash ./configure \
-    --host="$TARGET" \
-    --target="$TARGET" \
+    --host="$CONF_TRIPLE" \
+    --target="$CONF_TRIPLE" \
     --with-boot-jdk="$BOOT_JDK" \
     --with-jvm-variants="$JVM_VARIANT" \
     --with-debug-level=release \
