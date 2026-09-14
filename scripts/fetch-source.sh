@@ -42,8 +42,11 @@ PATCHES_DIR="${PATCHES_DIR:-$SCRIPT_DIR/../patches}"
 SRC="${SRC:-$ROOTDIR/jdk-src}"
 BOOT_JDK="${BOOT_JDK:-$ROOTDIR/boot-jdk}"
 
-# Shared with build.sh, which recomputes the same paths from $ROOTDIR.
+# Shared with build.sh, which recomputes the same paths from $ROOTDIR. The
+# scratch dir has to exist here: the edits below write helper scripts into it,
+# and it used to be created by the toolchain setup that runs in build.sh.
 BUILD_DIR="${BUILD_DIR:-$ROOTDIR/build}"
+mkdir -p "$BUILD_DIR"
 # OpenJDK's own name for the target OS, which is what the source layout and the
 # makefiles key on. build.sh derives the same value from the same two inputs.
 case "${PLATFORM:-}" in
@@ -2183,7 +2186,7 @@ fi
 # cannot parse this target, so a release that refreshes it is left alone.
 CONFIG_SUB_DIR="$SRC/make/autoconf/build-aux"
 [ -d "$CONFIG_SUB_DIR" ] || CONFIG_SUB_DIR="$SRC/common/autoconf/build-aux"
-if [ -f "$CONFIG_SUB_DIR/config.sub" ] \
+if [ -n "${TARGET:-}" ] && [ -f "$CONFIG_SUB_DIR/config.sub" ] \
    && ! bash "$CONFIG_SUB_DIR/config.sub" "$TARGET" >/dev/null 2>&1; then
   log "Refreshing config.sub (the bundled one predates android)"
   CONFIG_SUB_CACHE="$BUILD_DIR/autoconf-config.sub"
