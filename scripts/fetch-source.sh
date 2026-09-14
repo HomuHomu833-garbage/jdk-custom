@@ -213,11 +213,12 @@ path = sys.argv[1]
 s = io.open(path, encoding='utf-8', newline='').read()
 orig = s
 
-def sub(old, new, label):
+def sub(old, new, label, want=1):
     global s
-    if s.count(old) != 1:
-        raise SystemExit("os_windows.cpp: %s matched %d times, expected 1" % (label, s.count(old)))
-    s = s.replace(old, new, 1)
+    if s.count(old) != want:
+        raise SystemExit("os_windows.cpp: %s matched %d times, expected %d"
+                         % (label, s.count(old), want))
+    s = s.replace(old, new)
 
 # The arch name in the fatal error header.
 sub("  #define __CPU__ amd64\n#else\n",
@@ -262,20 +263,15 @@ sub("  ctx->Rdx = (DWORD)0;             // remainder\n"
     "#else\n  #error unknown architecture\n#endif\n",
     "Handle_IDiv_Exception")
 
-# The top level filter's pc. The AMD64 arm also probes for the AVX and APX
-# save/restore faults VM_Version raises deliberately, which no ARM has.
-sub("    return Handle_Exception(exceptionInfo, VM_Version::cpuinfo_cont_addr_apx());\n"
-    "  }\n#else\n  #error unknown architecture\n#endif\n",
-    "    return Handle_Exception(exceptionInfo, VM_Version::cpuinfo_cont_addr_apx());\n"
-    "  }\n"
+# The pc in topLevelExceptionFilter and topLevelVectoredExceptionFilter, which
+# spell this block identically, hence both.
+sub("  address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
+    "#else\n  #error unknown architecture\n#endif\n",
+    "  address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
     "#elif defined(_M_ARM)\n"
     "  address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
-    "\n"
-    "  if (handle_safefetch(exception_code, pc, (void*)exceptionInfo->ContextRecord)) {\n"
-    "    return EXCEPTION_CONTINUE_EXECUTION;\n"
-    "  }\n"
     "#else\n  #error unknown architecture\n#endif\n",
-    "topLevelExceptionFilter pc")
+    "top level filter pc", want=2)
 
 # The unhandled filter falls back to Eip, which only an x86-32 CONTEXT has.
 sub("    address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
