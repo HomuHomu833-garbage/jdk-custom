@@ -320,7 +320,8 @@ PYEOF
         # ARM64EC_NT_CONTEXT names the same bytes with the ARM64 registers, so
         # the fix is to read the context through it and to send every
         # arch-specific site down the aarch64 arm.
-        python3 - "$SRC/src/hotspot/os/windows/os_windows.cpp" \n                 "$SRC/src/hotspot/os_cpu/windows_aarch64/os_windows_aarch64.cpp" <<'PYEOF'
+        python3 - "$SRC/src/hotspot/os/windows/os_windows.cpp" \
+                 "$SRC/src/hotspot/os_cpu/windows_aarch64/os_windows_aarch64.cpp" <<'PYEOF'
 import io, sys
 
 shared, oscpu = sys.argv[1], sys.argv[2]
