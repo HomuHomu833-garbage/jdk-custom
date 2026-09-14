@@ -2381,12 +2381,21 @@ install_miniaudio() {
   # mention __arm64ec__, so they change nothing for any other target.
   local ma="$dest/miniaudio.h"
   if grep -q '^#if defined(__x86_64__) || defined(_M_X64)$' "$ma"; then
+    # Three tests, because ma_yield decides the architecture again on its own
+    # and would emit "rep; nop". The pointer-size test at the top of the file
+    # reads _M_X64 too, but 8 is right for this target, so it stays.
     sed -i \
       -e 's@^#if defined(__arm64) || defined(__arm64__) || defined(__aarch64__) || defined(_M_ARM64)$@#if defined(__arm64) || defined(__arm64__) || defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64ec__)@' \
       -e 's@^#if defined(__x86_64__) || defined(_M_X64)$@#if (defined(__x86_64__) || defined(_M_X64)) \&\& !defined(__arm64ec__)@' \
+      -e 's@^#if defined(__i386) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_X64)$@#if (defined(__i386) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_X64)) \&\& !defined(__arm64ec__)@' \
+      -e 's@^#elif (defined(__arm__) \&\& defined(__ARM_ARCH) \&\& __ARM_ARCH >= 7) || defined(_M_ARM64)@#elif defined(__arm64ec__) || (defined(__arm__) \&\& defined(__ARM_ARCH) \&\& __ARM_ARCH >= 7) || defined(_M_ARM64)@' \
       "$ma"
-    grep -q '^#if (defined(__x86_64__) || defined(_M_X64)) && !defined(__arm64ec__)$' "$ma" || {
-      echo "failed to keep miniaudio's x86 intrinsics away from arm64ec" >&2; exit 1; }
+    for want in '^#if (defined(__x86_64__) || defined(_M_X64)) && !defined(__arm64ec__)$' \
+                '^#if (defined(__i386) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_X64)) && !defined(__arm64ec__)$' \
+                '^#elif defined(__arm64ec__) || (defined(__arm__)'; do
+      grep -q "$want" "$ma" || {
+        echo "failed to keep miniaudio's x86 intrinsics away from arm64ec" >&2; exit 1; }
+    done
     log "Detecting arm64ec as ARM64 in miniaudio, not x64"
   fi
 }
