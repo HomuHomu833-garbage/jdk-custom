@@ -154,52 +154,28 @@ case "$PLATFORM" in
     esac
     ;;
   windows)
-    # Windows via llvm-mingw. This does NOT work, and not for want of a patch or
-    # two: OpenJDK has no linux-to-windows cross mode at all. Three separate
-    # walls, verified against 8 through 25:
-    #
-    #   1. configure only recognises a windows *build host*. basic_windows.m4
-    #      branches on OPENJDK_BUILD_OS_ENV being windows.cygwin / windows.msys2
-    #      / windows.wsl1 / windows.wsl2, so from linux it goes looking for
-    #      cygpath or wslpath and stops:
-    #        configure: error: Incorrect linux installation. Neither cygpath nor
-    #        wslpath was found
-    #   2. every release declares VALID_TOOLCHAINS_windows="microsoft", so
-    #      --with-toolchain-type=clang is refused even past that point.
-    #   3. the windows halves of NativeCompilation.gmk and the flags m4s are
-    #      written around MSVC conventions (.obj, link.exe, LIB, MT, RC,
-    #      manifests) which mingw does not share.
-    #
-    # Getting windows JDKs out of this repository means building them on a
-    # windows runner with MSVC, which is a separate path from everything here,
-    # not a fixup on top of it. The toolchain wiring below is left in place so
-    # that work has somewhere to start.
+    # Windows via llvm-mingw, cross-compiled from linux. Upstream has no such
+    # mode: configure only recognises a windows build host, every release
+    # declares VALID_TOOLCHAINS_windows="microsoft", and the windows halves of
+    # the makefiles are written around MSVC conventions (.obj, link.exe, LIB,
+    # MT, RC, manifests). Everything below rewrites those three assumptions in
+    # the fetched tree. 25 and 21 build and publish x86_64 and aarch64; i686 is
+    # excluded for both (see make_jdk_windows.yml), 17 is in progress.
     TC=/opt/llvm-mingw
     export CC="$TC/bin/${TARGET}-clang" CXX="$TC/bin/${TARGET}-clang++"
     EXTRA_CONF+=(AR="$TC/bin/${TARGET}-ar" NM="$TC/bin/${TARGET}-nm" STRIP="$TC/bin/${TARGET}-strip" OBJCOPY="$TC/bin/${TARGET}-objcopy" OBJDUMP="$TC/bin/${TARGET}-objdump")
     export RC="$TC/bin/${TARGET}-windres"
     TARGET_OS=windows
 
-    # Two configure assumptions stand between llvm-mingw and a windows target,
-    # both keyed on the target OS rather than on what is actually true of the
-    # build host or the compiler:
-    #
-    #   basic.m4 runs BASIC_SETUP_PATHS_WINDOWS whenever the *target* is
-    #   windows, and that macro wants a windows environment underneath it,
-    #   cygpath or wslpath, then a cmd.exe it can execute:
-    #     configure: error: Incorrect linux installation. Neither cygpath nor
-    #     wslpath was found
-    #   None of it is needed when the build host is linux and the toolchain
-    #   emits PE binaries directly, so run it only when the host really is
-    #   windows.
-    #
-    #   toolchain.m4 allows only "microsoft" for windows targets. The link
-    #   layer underneath is keyed on TOOLCHAIN_TYPE, not on the OS; Link.gmk
-    #   already carries a clang branch, and LinkMicrosoft.gmk only supplies
-    #   macros the microsoft path calls, so clang is worth allowing through.
-    #
-    # Whether that is enough is exactly what the next run measures; this is the
-    # first step of an unsupported configuration, not a finished one.
+    # Two configure assumptions keyed on the target OS rather than on the build
+    # host or the compiler:
+    #   basic.m4 runs BASIC_SETUP_PATHS_WINDOWS whenever the target is windows,
+    #   and that macro wants cygpath or wslpath and a cmd.exe to run ("Incorrect
+    #   linux installation. Neither cygpath nor wslpath was found"). None of it
+    #   applies when the host is linux, so gate it on the host.
+    #   toolchain.m4 allows only "microsoft" for windows targets, though the link
+    #   layer below is keyed on TOOLCHAIN_TYPE: Link.gmk already has a clang
+    #   branch, and LinkMicrosoft.gmk only supplies macros microsoft calls.
     for f in "$SRC/make/autoconf/basic.m4" "$SRC/common/autoconf/basic.m4"; do
       [ -f "$f" ] || continue
       grep -q '^  if test "x$OPENJDK_TARGET_OS" = "xwindows"; then$' "$f" || continue
@@ -355,32 +331,22 @@ EOF
 EOF
         log "Extending minwindef.h with the C++ min/max macros MSVC defines"
       fi
-      # WIN32_LEAN_AND_MEAN keeps windows.h from pulling in rpc.h, objbase.h and
-      # ole2.h, which are what define "interface" as a macro for struct. hotspot
-      # uses that as an ordinary identifier: opto/type.hpp has a bool
-      # parameter called interface, and undefining it once is not enough,
-      # because a later windows.h in the same translation unit brings it back.
-      # MSVC gets away with the same include chain because its windows.h leaves
-      # that definition to the COM headers hotspot never asks for.
-      # -fms-extensions: hotspot guards its memory probes with structured
-      # exception handling,
-      #   safefetch_windows.hpp:37: error: use of undeclared identifier '__try'
-      # clang parses __try/__except only with MS extensions enabled. It
-      # implements SEH for x86_64 and aarch64 windows; 32-bit x86 it does not,
-      # so i686 is expected to need a different answer here.
-      # flags-cflags.m4 sets -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0602 for
-      # every windows binary, but only in the microsoft branch, so a clang
-      # windows build gets neither. NOMINMAX belongs with them but is added to
-      # ALWAYS_DEFINES_JVM alone, hotspot wants windows.h's min/max macros
-      # gone so they cannot shadow std::min/std::max, while the JDK libraries
-      # still use min() as a macro (ProcessImpl_md.c does). It is applied to the
-      # JVM only, further down.
-      # WIN32 and IAL come from ALWAYS_DEFINES_JDK, which sits in the microsoft
-      # branch beside the two above. Shared code tests WIN32 to pick the windows
-      # half of a #ifdef, so without it a windows build compiles the unix one:
-      #   NativeFunc.h:37: fatal error: 'dlfcn.h' file not found
-      # (hotspot gets -DWIN32 separately, from CFLAGS_OS_DEF_JVM, which is keyed
-      # on the OS and so already reaches us; repeating it here is harmless.)
+      # flags-cflags.m4 sets these for every windows binary, but only in the
+      # microsoft branch, so a clang windows build gets none of them:
+      #   WIN32_LEAN_AND_MEAN  keeps windows.h from pulling in rpc.h, objbase.h
+      #     and ole2.h, which define "interface" as a macro for struct. hotspot
+      #     uses it as an identifier (opto/type.hpp has a bool parameter called
+      #     interface), and undefining it once does not hold: a later windows.h
+      #     in the same TU brings it back. MSVC's own windows.h leaves that
+      #     definition to COM headers hotspot never asks for.
+      #   WIN32 and IAL  from ALWAYS_DEFINES_JDK. Shared code tests WIN32 to pick
+      #     the windows half of a #ifdef, so without it the unix half compiles:
+      #     NativeFunc.h:37: fatal error: 'dlfcn.h' file not found
+      #   -fms-extensions  clang parses the __try/__except guarding hotspot's
+      #     memory probes only with MS extensions on.
+      # NOMINMAX belongs here but goes to the JVM alone, further down: hotspot
+      # wants windows.h's min/max gone so they cannot shadow std::min/std::max,
+      # while the JDK libraries still use min() as a macro (ProcessImpl_md.c).
       WIN_DEFS="-DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0602 -DWIN32 -DIAL"
       # -Wno-nonportable-include-path: the aliases above are exactly what that
       # warning is for, <Windows.h> resolving to a file named windows.h, so
@@ -423,14 +389,10 @@ EOF
     # Cast it, the way the same file already does elsewhere for GetProcAddress
     # results.
     # Windows libraries are listed MSVC-style throughout the build
-    # (LIBS_windows := kernel32.lib user32.lib ws2_32.lib ...), and clang for
-    # mingw reads a bare foo.lib as a filename rather than a library to search
-    # for:
-    #   clang: error: no such file or directory: 'powrprof.lib'
-    # Translating them at each definition would mean touching hotspot and every
-    # java.* library makefile, so do it once where the link is set up. Upstream
-    # already has the notion of LIBS_<toolchain>; the JDK simply spells these
-    # per-OS instead.
+    # (LIBS_windows := kernel32.lib ...), and mingw clang reads a bare foo.lib as
+    # a filename ("no such file or directory: 'powrprof.lib'"). Translating at
+    # each definition would mean touching hotspot and every java.* makefile, so
+    # do it once where the link is set up.
     LNK="$SRC/make/common/native/Link.gmk"
     if [ -f "$LNK" ] && grep -q '_STRIPFLAGS ?= $(STRIPFLAGS)' "$LNK"; then
       awk '
@@ -457,15 +419,12 @@ EOF
     # the block above finds no file and hotspot's own library list reaches clang
     # untranslated:
     #   clang: error: no such file or directory: 'kernel32.lib'
-    # The anchor is the end of the LIBS assembly, which is the same point in the
-    # macro that Link.gmk's _STRIPFLAGS line marks on 25, after the per-OS and
-    # per-toolchain lists have been folded in, before the link command is built.
-    # 21 spells that assembly over two lines, the second folding in the
-    # _$(TOOLCHAIN_TYPE) variants; 17 has no such variants and stops at the
-    # per-OS line. Match whichever line ends the statement, the one naming
-    # _LIBS_$(OPENJDK_TARGET_OS that does not continue onto the next, so the
-    # block lands after the whole list either way, and after the EXTRA_LDFLAGS
-    # assembly that both versions put immediately above it.
+    # The anchor is the end of the LIBS assembly, the point Link.gmk's
+    # _STRIPFLAGS line marks on 25: after the per-OS and per-toolchain lists are
+    # folded in, before the link command is built. 21 spells that over two lines
+    # (the second folding in _$(TOOLCHAIN_TYPE)), 17 has no such variants. Match
+    # whichever line ends the statement so the block lands after the whole list
+    # either way.
     NC="$SRC/make/common/NativeCompilation.gmk"
     if [ -f "$NC" ] && grep -q '\$1_EXTRA_LIBS += \$\$(\$1_LIBS_\$(OPENJDK_TARGET_OS_TYPE))' "$NC" &&
        ! grep -q 'mingw wants -lfoo' "$NC"; then
@@ -533,10 +492,9 @@ EOF
       awk '
         $0 == "    $1_CXXFLAGS := $$($1_CFLAGS)" {
           print
-          print "    # -std=c99 (17) and -std=c11 (21) are C-only; clang refuses them on"
-          print "    # C++ sources, and a"
-          print "    # windows-only C++ library declares CFLAGS alone because cl.exe"
-          print "    # accepts the C standard flag there and ignores it."
+          print "    # -std=c99 (17) and -std=c11 (21) are C-only; clang refuses them"
+          print "    # on C++ sources, and a windows-only C++ library declares CFLAGS"
+          print "    # alone because cl.exe accepts the C standard flag and ignores it."
           print "    ifeq ($(call isTargetOs, windows)-$(TOOLCHAIN_TYPE), true-clang)"
           print "      $1_CXXFLAGS := $$(patsubst -std=c11,-std=c++14,$$(patsubst -std=c99,-std=c++14,$$($1_CXXFLAGS)))"
           print "    endif"
@@ -562,12 +520,10 @@ EOF
     # nothing:
     #   Lib.gmk: LIBS_windows := jvm.lib Mswsock.lib ws2_32.lib
     #   lld: error: unable to find library -lMswsock
-    # 25 lowercased these upstream (mswsock.lib there); 21 still has Mswsock.lib
-    # in java.base and Secur32.lib twice in java.security.jgss, so sweep the
-    # makefiles once instead of meeting them one link at a time. Only bare names
-    # are touched, a match must start at the beginning of a line or after
-    # whitespace, which leaves $(SUPPORT_OUTPUTDIR)/.../net.lib and $(WIN_JAVA_LIB)
-    # alone.
+    # 25 lowercased these upstream; 21 still has Mswsock.lib in java.base and
+    # Secur32.lib twice in java.security.jgss, so sweep the makefiles once. A
+    # match must start a line or follow whitespace, which leaves path-valued
+    # entries like $(SUPPORT_OUTPUTDIR)/.../net.lib alone.
     win_lib_case=0
     while IFS= read -r f; do
       grep -qE '(^|[[:space:]])[A-Za-z0-9_]*[A-Z][A-Za-z0-9_]*\.lib' "$f" || continue
@@ -672,16 +628,12 @@ EOF
       log "Emitting import libraries for the mingw DLL links"
     fi
 
-    # All of hotspot compiles now; the export machinery is next. CompileJvm.gmk
-    # builds a .def listing the C++ vftable symbols to export from jvm.dll by
-    # running MSVC's dumpbin over the object files, and passes it as -def:. The
-    # tool is not here, and the flag is link.exe syntax:
-    #   [.../win-exports.def] Error 127
-    # Both are guarded by "target is windows" rather than "toolchain is
-    # microsoft", the same as everything else in this port. mingw exports the
-    # JNIEXPORT entry points from their __declspec(dllexport) anyway; what the
-    # .def adds beyond that is vftable symbols for debugging tools, which a
-    # first working build can do without.
+    # CompileJvm.gmk lists jvm.dll's vftable exports in a .def built by running
+    # MSVC's dumpbin over the objects, then passes it as -def:. Neither the tool
+    # nor the flag spelling exists here ("[.../win-exports.def] Error 127"), and
+    # both are guarded on the target OS rather than the toolchain. mingw exports
+    # the JNIEXPORT entry points from __declspec(dllexport) anyway; the .def only
+    # adds vftable symbols for debugging tools.
     CJ="$SRC/make/hotspot/lib/CompileJvm.gmk"
     if [ -f "$CJ" ] && grep -q 'JVM_LDFLAGS += -def:\$(WIN_EXPORT_FILE)' "$CJ"; then
       perl -0pi -e 's/^  JVM_LDFLAGS \+= -def:\$\(WIN_EXPORT_FILE\)$/  ifeq (\$(TOOLCHAIN_TYPE), microsoft)\n    JVM_LDFLAGS += -def:\$(WIN_EXPORT_FILE)\n  endif/m' "$CJ"
@@ -728,35 +680,22 @@ EOF
       log "Skipping the dumpbin-generated jvm.dll mapfile"
     fi
 
-    # The per-library makefiles spell their windows compiler flags in MSVC's
-    # dialect, keyed on the target OS rather than the toolchain:
+    # Per-library makefiles spell windows compiler flags in MSVC's dialect, keyed
+    # on the target OS rather than the toolchain:
     #   AwtLibraries.gmk: CFLAGS_windows := -EHsc ...
     #   clang: error: unknown argument: '-EHsc'
-    # These are switches with no cl.exe-independent meaning at all, so there is
-    # nothing to translate: clang's defaults already match what each one asks
-    # for (exceptions on for C++, UTF-8 sources, no banner). Strip the ones that
-    # are unambiguously MSVC-only, in one pass over the makefiles, rather than
-    # meeting them one build failure at a time.
-    # -MD and -MT are included after checking every occurrence in make/**/*.gmk:
-    # all of them select a runtime library for cl.exe, none generates
-    # dependencies, which is what left them out before. Leaving -MT in is worse
-    # than removing it: clang's -MT takes an argument, so
-    #   CXXFLAGS := -MT -DACCESSBRIDGE_ARCH_64
-    # quietly consumed that define rather than failing, and the accessibility
-    # tools have been building without it.
-    # A comma ends an argument in these makefiles, so it has to be excluded from
-    # -Zc:'s value and accepted as a terminator in its own right. Getting that
-    # wrong ate the comma after CXXFLAGS_FILTER_OUT := -Zc:wchar_t-, which
-    # merged that argument with the CXXFLAGS following it, so jabswitch lost
-    # its whole flag list, -DUNICODE included, and picked the ANSI half of every
-    # windows API while passing it wide literals.
-    # The flags are matched with either spelling of the switch character. cl.exe
-    # takes - and / alike and the JDK mixes them: 21 writes
-    #   jdk.attach/Lib.gmk: CFLAGS_windows := /Gy
-    # which the dash-only pattern walked straight past, leaving clang to read it
-    # as a filename ("no such file or directory: '/Gy'"). 25 normalised that one
-    # to -Gy. Only whole tokens from the list below are matched, so MakeBase's
-    # "mklink /J" and ordinary absolute paths are not candidates.
+    # None has a cl.exe-independent meaning; clang's defaults already do what
+    # each asks for. Strip them in one pass rather than one build failure at a
+    # time. Three traps, each paid for once:
+    #   -MD/-MT all select a cl.exe runtime here (checked every occurrence), but
+    #   clang's -MT takes an argument, so leaving it in silently ate the define
+    #   after it in "CXXFLAGS := -MT -DACCESSBRIDGE_ARCH_64".
+    #   A comma ends an argument in these makefiles, so it must terminate -Zc:'s
+    #   value. Eating the comma in "CXXFLAGS_FILTER_OUT := -Zc:wchar_t-," merged
+    #   that argument with the next, costing jabswitch its whole flag list.
+    #   cl.exe takes - and / alike and the JDK mixes them (21 has /Gy where 25
+    #   has -Gy), so both spellings match. Whole tokens only, which leaves
+    #   MakeBase's "mklink /J" and absolute paths alone.
     MSVC_ONLY='EHsc|EHa|wd[0-9]+|Zc:[^ ),]+|Z[i7]|permissive-|utf-8|nologo'
     MSVC_ONLY="$MSVC_ONLY|guard:cf|FS|GS|Gy|GR|Gd|Gm-?|Od|Ob[0-9]|Oi|Ot|Oy-?"
     MSVC_ONLY="$MSVC_ONLY|RTC[1csu]+|MP|W[0-4]|WX-?|analyze-?|sdl-?|MD|MT"
@@ -774,21 +713,14 @@ EOF
       fi
     fi
 
-    # The version-info resource compiles fine, llvm-mingw's rc handles the
-    # .rc and the -Fo spelling, but the step after it does not. RC cannot
-    # report its own includes, so the build re-runs the resource through the C
-    # compiler purely to harvest a dependency list, in MSVC's dialect and
-    # without asking which toolchain is in use:
-    #   $1_CC ... -showIncludes -nologo -TC -Fo... -P -Fi...
+    # The .rc itself compiles, but RC cannot report its own includes, so the
+    # build re-runs the resource through the C compiler to harvest a dependency
+    # list, in MSVC's dialect and without asking the toolchain:
     #   clang: error: unknown argument: '-showIncludes'
-    # There is no clang equivalent worth reconstructing here: the .d file it
-    # produces only makes an incremental rebuild notice an edited .rc header,
-    # and every build in this repository starts from a fresh tree. Drop the
-    # scan; both files it feeds are pulled in with -include, so their absence
-    # is already a supported state.
-    # 25 keeps this in make/common/native/CompileFile.gmk; 21 and older keep it
-    # in the one NativeCompilation.gmk. The block itself is identical in both,
-    # down to the line it ends on, so look in whichever file has it.
+    # Nothing worth reconstructing: that .d only lets an incremental rebuild
+    # notice an edited .rc header, and every build here starts from a fresh tree.
+    # The block is identical in 25's make/common/native/CompileFile.gmk and 21's
+    # NativeCompilation.gmk, so look in whichever file has it.
     for CFG in "$SRC/make/common/native/CompileFile.gmk" \
                "$SRC/make/common/NativeCompilation.gmk"; do
       [ -f "$CFG" ] || continue
@@ -907,13 +839,12 @@ EOF
     # identifier as a string resource name; llvm-rc does not:
     #   llvm-rc: Error parsing file: expected int or string, got
     #   cjaccessinspectorMenus
-    # Quote it, which is what MSVC decided it meant, but only where the
-    # dialog refers to the menu ("MENU <name>"), not where the menu declares
-    # itself ("<name> MENU"). The two positions take different things: llvm-rc
-    # wants an int or string for the reference and an int or identifier for the
-    # declaration, so quoting both, or the wrong one, just trades one parse
-    # error for the other. Only names that really are undefined are touched,
-    # quoting a macro would turn an integer id into a string one.
+    # Quote it, as MSVC did, but only where the dialog refers to the menu
+    # ("MENU <name>"), not where the menu declares itself ("<name> MENU"):
+    # llvm-rc wants an int or string for the reference and an int or identifier
+    # for the declaration, so quoting the wrong one trades one parse error for
+    # another. Only genuinely undefined names are touched, since quoting a macro
+    # would turn an integer id into a string one.
     for rc in "$SRC"/src/jdk.accessibility/windows/native/*/*.rc; do
       [ -f "$rc" ] || continue
       for tok in $(sed -nE 's/^MENU ([A-Za-z_][A-Za-z0-9_]*)$/\1/p' "$rc" | sort -u); do
@@ -928,17 +859,14 @@ EOF
     # splashscreen_sys.c calls alloca without including <malloc.h>, where both
     # MSVC and mingw declare it, MSVC's windows.h chain happens to pull it in:
     #   splashscreen_sys.c:147: error: use of undeclared identifier 'alloca'
-    # The include alone is not enough: mingw hides the unprefixed spelling
-    # behind NO_OLDNAMES, which _mingw.h sets whenever __STRICT_ANSI__ is, and
-    # the JDK compiles C as -std=c11 rather than gnu11. Rather than loosen the
-    # language level for the whole build, spell out the definition mingw would
-    # have given us, it is the same __builtin_alloca either way.
-    # It has to be object-like. The call site passes alloca to a macro as a
-    # bare token, and sizecalc.h invokes it as (func)(size); a function-like
-    # macro is not expanded when its name is not followed by a parenthesis, so
-    # the identifier survives to the compiler and is undeclared. Aliasing the
-    # name instead expands in both positions, which is exactly the form
-    # mingw's own non-GNU branch uses.
+    # The include alone is not enough: mingw hides the unprefixed spelling behind
+    # NO_OLDNAMES, which _mingw.h sets whenever __STRICT_ANSI__ is, and the JDK
+    # compiles C as -std=c11 rather than gnu11. Rather than loosen the language
+    # level everywhere, spell out mingw's own definition; it is the same
+    # __builtin_alloca. It must be object-like: sizecalc.h invokes it as
+    # (func)(size), and a function-like macro is not expanded when its name is
+    # not followed by a parenthesis. Aliasing the name works in both positions,
+    # which is the form mingw's non-GNU branch uses.
     SPL="$SRC/src/java.desktop/windows/native/libsplashscreen/splashscreen_sys.c"
     if [ -f "$SPL" ] && ! grep -q '^#define alloca __builtin_alloca$' "$SPL"; then
       perl -0pi -e 's/^#include "splashscreen_impl\.h"$/#include <malloc.h>\n#undef alloca\n#define alloca __builtin_alloca\n#include "splashscreen_impl.h"/m' "$SPL"
@@ -951,20 +879,14 @@ EOF
     # runtime it needs is simply absent:
     #   ld.lld: error: undefined symbol: operator delete(void*)
     #   ld.lld: error: undefined symbol: std::nothrow
-    # SetupNativeCompilation takes that as LINK_TYPE := C++. sspi_bridge, one
-    # C++ file, does not say it, and saproc says LINK_TYPE := C outright for
-    # every OS but linux. Nothing upstream noticed, because the windows-only
-    # C++ libraries have only ever been linked by MSVC, where link.exe serves
-    # both languages and the CRT carries operator new either way. Rather than
-    # name each library as it turns up, infer it from the sources, which are
-    # known one step after the toolchain is set up. C++ sources always win over
-    # a declared C link type, a C driver cannot link them anywhere, and the
-    # declaration only ever meant "MSVC will sort it out". A caller that named
-    # its own linker is still left alone.
-    # Two shapes to cover. 25 splits the native makefiles under
-    # make/common/native/ and picks the linker from LINK_TYPE; 21 and older
-    # keep one NativeCompilation.gmk and pick it by naming a whole toolchain
-    # (TOOLCHAIN_LINK_CXX). Same inference either way, expressed twice.
+    # SetupNativeCompilation takes that as LINK_TYPE := C++, which sspi_bridge
+    # does not say and saproc contradicts (LINK_TYPE := C for every OS but
+    # linux). Upstream never noticed: link.exe serves both languages. Infer it
+    # from the sources instead of naming each library as it turns up. C++ sources
+    # beat a declared C link type, which only ever meant "MSVC will sort it out";
+    # a caller that named its own linker is left alone. Expressed twice, because
+    # 25 picks the linker from LINK_TYPE under make/common/native/ while 21 and
+    # older name a whole toolchain (TOOLCHAIN_LINK_CXX) in NativeCompilation.gmk.
     NCG="$SRC/make/common/NativeCompilation.gmk"
     if [ -f "$NCG" ] && ! grep -q 'INFERRED_LINK_TYPE' "$NCG" \
        && ! grep -q 'SetupSourceFiles' "$NCG"; then
@@ -1070,18 +992,14 @@ EOF
     #   security.cpp:660: error: cannot initialize a parameter of type
     #   'const jchar *' (aka 'const unsigned short *') with an lvalue of type
     #   'wchar_t *'
-    # It compiles under MSVC because the JDK builds windows C++ with
-    # -Zc:wchar_t-, making wchar_t a typedef for unsigned short rather than a
-    # type of its own. clang spells that -fno-wchar, and it cannot be used
-    # here: mingw's headers take a builtin wchar_t for granted in C++ and stop
-    # declaring the type at all without it, so corecrt.h and stdio.h fall over
-    # with "unknown type name 'wchar_t'". Cast at the JNI boundary instead,
-    # both types are 16-bit unsigned on windows, which is the assumption the
-    # MSVC flag encodes anyway.
-    # Only 21+ needs this: 17 and earlier build the name with NewStringUTF() off
-    # a char*, so there is no wchar_t at the JNI boundary to reconcile. Keying
-    # the guard on the unfixed call keeps it idempotent too: once cast, the
-    # text reads NewString((const jchar*)pszNameString and no longer matches.
+    # MSVC accepts it because the JDK builds windows C++ with -Zc:wchar_t-,
+    # making wchar_t a typedef for unsigned short. clang's equivalent,
+    # -fno-wchar, is unusable here: mingw's headers assume a builtin wchar_t in
+    # C++ and stop declaring the type without it. Cast at the JNI boundary
+    # instead; both types are 16-bit unsigned on windows, which is what the MSVC
+    # flag encodes anyway. 21+ only, since 17 and earlier build the name with
+    # NewStringUTF() off a char*. Guarding on the unfixed call keeps it
+    # idempotent: once cast, the text no longer matches.
     SEC="$SRC/src/jdk.crypto.mscapi/windows/native/libsunmscapi/security.cpp"
     if [ -f "$SEC" ] && grep -q 'env->NewString(pszNameString' "$SEC"; then
       sed -i \
@@ -1172,15 +1090,11 @@ EOF
     #   between literal and identifier
     #   sspi.cpp:389: error: cannot jump from this goto statement to its label
     # The first is "[SSPI:%ld] "fmt"\n" with no spaces around the macro
-    # parameter. The second is C++ refusing to jump into the scope of an
-    # initialised variable: the function's error path gotos hop over five
-    # declarations-with-initialisers, which clang names one by one.
-    #
-    # 21 fixed both, and split exactly those five declarations from their
-    # assignments, so follow it. What is deliberately not taken from 21 is its
-    # accompanying new[]/delete[] to malloc/free rewrite: that is a separate
-    # upstream change, and adopting the allocation half here without its matching
-    # frees would pair malloc with delete[].
+    # parameter; the second is the error path's gotos hopping over five
+    # declarations-with-initialisers. 21 fixed both by splitting exactly those
+    # five, so follow it. Not taken from 21: its new[]/delete[] to malloc/free
+    # rewrite, a separate change whose allocation half alone would pair malloc
+    # with delete[].
     SSPI="$SRC/src/java.security.jgss/windows/native/libsspi_bridge/sspi.cpp"
     if [ -f "$SSPI" ] && grep -qF '] "fmt"' "$SSPI"; then
       perl -0777 -i -pe '
@@ -1244,24 +1158,17 @@ EOF
       log "Concatenating rather than pasting the D3D trace literals ($d3d_pastes macros)"
     fi
 
-    # libawt has the same shape sspi.cpp did: JNI_CHECK_PEER_GOTO and friends
-    # jump to a label further down, and C++ will not let that skip a variable's
-    # initialisation, where MSVC only warns:
+    # Same shape as sspi.cpp: JNI_CHECK_PEER_GOTO and friends jump to a label
+    # further down, and C++ will not let that skip an initialisation where MSVC
+    # only warns:
     #   awt_Canvas.cpp:215: error: cannot jump from this goto statement to its
-    #   label
-    #   note: jump bypasses variable initialization
-    #     217 |     AwtCanvas *c = (AwtCanvas*)pData;
-    # 21 rewrote this function to drop the macro entirely; splitting the
-    # declaration from the assignment fixes the compile without touching the
-    # control flow, which is what it did for sspi.cpp too.
-    #
-    # awt_Canvas is the one the compiler named. The other three are the same
-    # construct, a declaration with an initialiser standing after a _GOTO
-    # macro, found by reading the sources rather than by a build. Splitting a
-    # pointer or handle declaration is semantics-neutral whether or not a goto
-    # actually crosses it, so they are done here rather than one 9-minute build
-    # at a time. Each is applied only if its exact text is present; the
-    # awt_Canvas one is required, since that is the failure in hand.
+    #   label; jump bypasses variable initialization
+    # Splitting the declaration from the assignment fixes it without touching the
+    # control flow. awt_Canvas is the one the compiler named; the other three are
+    # the same construct, found by reading the sources. Splitting a pointer or
+    # handle declaration is semantics-neutral whether or not a goto crosses it,
+    # so all four go in at once rather than one 9-minute build at a time. Each
+    # applies only if its exact text is present, awt_Canvas required.
     awt_dir="$SRC/src/java.desktop/windows/native/libawt/windows"
     if [ -d "$awt_dir" ]; then
       # Find them rather than meet them one build at a time: walk each file
@@ -1315,16 +1222,13 @@ PLEOF
       fi
     fi
 
-    # One declaration the scan above deliberately will not touch: a const cannot
-    # be separated from its initialiser, so splitting is not available.
-    #   awt_PrintJob.cpp:927: error: cannot jump from this goto statement to its
-    #   label
-    #   note: jump bypasses variable initialization
+    # One the scan above will not touch: a const cannot be split from its
+    # initialiser.
+    #   awt_PrintJob.cpp:927: cannot jump from this goto statement to its label
     #     935 |     const double epsilon = 0.10;
-    # Move it above the goto instead. It is a literal with nothing to depend on,
-    # and JNI_CHECK_NULL_GOTO is the first jump in that function, so nothing else
-    # crosses it afterwards. 21 has the same constant and does not trip over it
-    # because it replaced that macro with an explicit null check and return.
+    # Move it above the goto instead; it is a literal depending on nothing, and
+    # JNI_CHECK_NULL_GOTO is the first jump in that function. 21 has the same
+    # constant but replaced that macro with an explicit null check.
     # This is the only qualified declaration in libawt sitting under a goto, so
     # it is done by name rather than by another scan.
     PJ="$awt_dir/awt_PrintJob.cpp"
@@ -1408,21 +1312,16 @@ PLEOF
       log "Including awt_ole.h before awt.h in $awt_ole_hoists sources"
     fi
 
-    # libjsvml is the SVML vector math library, and its windows sources are
-    # MASM: assembled by ml64.exe upstream, and unparseable to clang's GNU
-    # assembler from the copyright header down,
+    # libjsvml's windows sources are MASM, assembled by ml64.exe upstream and
+    # unparseable to clang's GNU assembler from the copyright header down:
     #   jsvml_d_acos_windows_x86.S:25: error: invalid instruction mnemonic
     #   'questions.'
-    # There are hundreds of these files and no translation worth attempting;
-    # the linux copies of the same routines are separate sources in GNU syntax,
-    # which is why only the windows build hits this. Drop the library on
-    # windows and leave linux alone.
+    # Hundreds of files, no translation worth attempting. Linux has the same
+    # routines as separate GNU-syntax sources, so only windows hits this.
     #
-    # This is a functional reduction, and the only one so far. It is a soft
-    # dependency: VectorMathLibrary loads "jsvml" and falls back to "new Java()"
-    # on any Throwable, so the Vector API keeps working and computes
-    # transcendental vector math in Java rather than through SVML. That is
-    # slower for those operations and correct.
+    # A functional reduction, and a soft one: VectorMathLibrary loads "jsvml" and
+    # falls back to "new Java()" on any Throwable, so the Vector API still works,
+    # computing transcendental vector math in Java. Slower, and correct.
     VEC="$SRC/make/modules/jdk.incubator.vector/Lib.gmk"
     if [ -f "$VEC" ] && grep -q 'isTargetOs, linux windows' "$VEC"; then
       sed -i 's/isTargetOs, linux windows/isTargetOs, linux/' "$VEC"
@@ -1777,31 +1676,21 @@ PLEOF
 
     # From here on the problems are hotspot's rather than the build system's.
     #
-    # globalDefinitions_gcc.hpp is the compiler-family header, picked because the
-    # toolchain is clang, and it is written for unix: alloca lives in <malloc.h>
-    # on mingw rather than <alloca.h>, and there is no <dlfcn.h> or <pthread.h>
-    # at all,
-    #   fatal error: 'dlfcn.h' file not found
+    # globalDefinitions_gcc.hpp comes in because the toolchain is clang, and it
+    # is written for unix: alloca is in <malloc.h> on mingw, and <dlfcn.h> and
+    # <pthread.h> do not exist ("fatal error: 'dlfcn.h' file not found").
     # hotspot reaches dynamic loading and threads through its os layer on
-    # windows, so nothing here needs those two.
-    # Guarded separately: 21 includes dlfcn.h and pthread.h but no alloca.h, so
-    # keying both on the alloca include, as this did, silently skipped the
-    # dlfcn fix there and left the build failing on a header this block exists
-    # to remove.
-    # jvm.dll links its MSVC-named libraries now, and stops on hotspot's own
-    # code: the windows halves of ZGC and XGC call XMemory/ZMemory accessors
-    # without including the headers that define them,
+    # windows, so it needs neither. Guarded separately because 21 has the dlfcn
+    # and pthread includes but no alloca.h; keying both on alloca silently
+    # skipped the dlfcn fix there.
+    # The windows halves of ZGC and XGC call XMemory/ZMemory accessors without
+    # including the headers that define them:
     #   ld.lld: error: undefined symbol: ZMemory::start() const
-    #   >>> referenced by zVirtualMemory_windows.obj:(...PlaceholderCallbacks...)
-    # xVirtualMemory_windows.cpp includes xVirtualMemory.hpp, which reaches
-    # xMemory.hpp for the declarations, but the bodies are inline in
-    # xMemory.inline.hpp and nothing pulls that in. cl.exe hides the omission:
-    # it emits a COMDAT copy of every inline function each TU uses, so the
-    # definition another TU emitted satisfies this reference at link time. clang
-    # inlines them away instead and emits nothing, leaving the call unresolved.
-    # Add the include each file should have had, in hotspot's alphabetical order.
-    # Both files are gone in 25 (ZGC's windows mapper was restructured), so this
-    # is 21's alone.
+    # They reach xMemory.hpp for the declarations, but the bodies are inline in
+    # xMemory.inline.hpp and nothing pulls it in. cl.exe hides that by emitting a
+    # COMDAT copy of every inline function each TU uses, so another TU's copy
+    # satisfies the reference; clang inlines them away and emits nothing. Add the
+    # include each file should have had. 21 only: both files are gone in 25.
     for gc in x z; do
       XVM="$SRC/src/hotspot/os/windows/gc/$gc/${gc}VirtualMemory_windows.cpp"
       [ -f "$XVM" ] || continue
@@ -1952,19 +1841,16 @@ PLEOF
       log "Not poisoning sprintf/vsprintf/vsnprintf (mingw declares them C++)"
     fi
 
-    # CreateWindowsResourceFile compiles the .rc with RC (windres here, fine),
-    # then runs the *C compiler* over it a second time purely to list includes
-    # for a dependency file, with -showIncludes -nologo -TC -P -Fi, which the
-    # comment above it admits is misusing CL. clang refuses them:
-    #   clang: error: unknown argument: '-showIncludes'
-    # The dependency files are only ever -included, so skipping the step costs
-    # nothing on a clean build. Keep it for the microsoft toolchain.
-    # Fold llvm-mingw's own runtime, libunwind, libc++, libwinpthread, into
-    # each binary, so the JDK does not need those DLLs shipped beside it. This is
-    # as static as Windows gets: the CRT itself (msvcrt/ucrtbase) is an OS
-    # component, and there is no static archive of it to link. dlopen has no
-    # equivalent problem here, LoadLibrary is a system call, not a libc feature,
-    # so JNI and the rest keep working.
+    # CreateWindowsResourceFile compiles the .rc with RC (windres, fine), then
+    # runs the C compiler over it again just to list includes for a dependency
+    # file, with -showIncludes -nologo -TC -P -Fi. clang refuses those, and the
+    # dependency files are only ever -included, so skipping the step costs
+    # nothing on a clean build. Kept for the microsoft toolchain.
+    #
+    # Fold llvm-mingw's runtime (libunwind, libc++, libwinpthread) into each
+    # binary so no DLLs ship beside the JDK. That is as static as Windows gets:
+    # the CRT itself is an OS component with no static archive to link. dlopen
+    # is unaffected, LoadLibrary being a system call rather than a libc feature.
     EXTRA_CONF+=(--with-extra-ldflags=-static)
     ;;
   macos)
@@ -2015,23 +1901,18 @@ PLEOF
 esac
 
 # --- tell configure what the build machine is -------------------------------
-# config.guess probes the *build* system's libc by compiling with $CC, and $CC is
-# a cross compiler here, so it reports the builder as whatever we are targeting:
-# "x86_64-pc-linux-android" for the android targets, "...-androidx32" for the
-# 32-bit arm one. That is wrong everywhere, and actively breaks any target whose
-# CPU matches the builder: for x86_64-linux-android the bogus build triple equals
-# the host triple, configure concludes "compilation type... native", and host
-# build tools such as adlc get compiled with the NDK compiler, producing android
-# binaries the build itself then tries to run ("adlc: cannot execute: required
-# file not found"). Pass the real build triple so COMPILE_TYPE and every
+# config.guess probes the build system's libc by compiling with $CC, which is a
+# cross compiler here, so it reports the builder as whatever we target. That
+# breaks any target whose CPU matches the builder: for x86_64-linux-android the
+# bogus build triple equals the host triple, configure calls it a native build,
+# and host tools such as adlc come out as android binaries the build then tries
+# to run ("adlc: cannot execute: required file not found"). Pass the real build
+# triple so COMPILE_TYPE and every OPENJDK_BUILD_* value are derived correctly.
 #
-# The triple goes in as the autoconf --build/--host/--target set rather than via
-# --openjdk-target, because 8, 11 and 17 refuse the two together outright
-# ("Specifying --openjdk-target together with autoconf legacy cross-compilation
-# flags is not supported") while 21 and 25 accept it. Every one of them takes the
-# autoconf set on its own, with a warning, and --openjdk-target expands to
-# exactly this internally, so it is the one spelling that works across all five.
-# OPENJDK_BUILD_* value are derived correctly.
+# It goes in as the autoconf --build/--host/--target set, not --openjdk-target:
+# 8, 11 and 17 refuse the two together ("Specifying --openjdk-target together
+# with autoconf legacy cross-compilation flags is not supported"), while all five
+# accept the autoconf set on its own, which is what --openjdk-target expands to.
 BUILD_TRIPLE="$(gcc -dumpmachine 2>/dev/null || clang -dumpmachine 2>/dev/null || true)"
 [ -n "$BUILD_TRIPLE" ] || { echo "cannot determine the build triple (no gcc/clang?)" >&2; exit 1; }
 EXTRA_CONF+=(--build="$BUILD_TRIPLE")
@@ -2321,16 +2202,13 @@ if [ "$PLATFORM" = android ]; then
   # libthread_db through <thread_db.h>, which bionic has no equivalent of:
   #   proc_service.h:29:10: fatal error: 'thread_db.h' file not found
   # 11+ get this from patch 0011, which can gate on OPENJDK_TARGET_LIBC; 8's
-  # hotspot makefiles are handed no libc information at all, so do it here where
-  # the platform is known. Two edits: stop saproc.make building the library, and
-  # take it out of the export list, which demands it whether or not anything
-  # built it. Only the libsaproc entry goes, ADD_SA_BINARIES also names
-  # sa-jdi.jar, which is pure Java, builds from sa.make regardless, and is what
-  # the images stage goes looking for:
-  #   No rule to make target '.../jdk/lib/sa-jdi.jar', needed by
-  #   '.../images/lib/sa-jdi.jar'
-  # Editing the entry rather than the EXPORT_LIST line also keeps the per-arch
-  # gating, so the Zero targets that never had SA stay untouched.
+  # hotspot makefiles are handed no libc information, so do it here where the
+  # platform is known. Two edits: stop saproc.make building the library, and take
+  # it out of the export list, which demands it either way. Only the libsaproc
+  # entry goes; ADD_SA_BINARIES also names sa-jdi.jar, which is pure Java and is
+  # what the images stage looks for ("No rule to make target sa-jdi.jar").
+  # Editing the entry rather than the EXPORT_LIST line keeps the per-arch gating,
+  # so Zero targets that never had SA stay untouched.
   if [ "$JDK_VERSION" = 8 ]; then
     SA_MAKE="$SRC/hotspot/make/linux/makefiles/saproc.make"
     HS_DEFS="$SRC/hotspot/make/linux/makefiles/defs.make"
@@ -2395,25 +2273,19 @@ if [ "$JVM_VARIANT" = zero ]; then
 fi
 
 # --- headers-only deps (cups, fontconfig, X11) ------------------------------
-# configure requires both for every target except windows/macosx (NEEDS_LIB_CUPS
-# / NEEDS_LIB_FONTCONFIG), and --enable-headless-only does not exempt them:
-# libawt_headless compiles CUPSfuncs.c and fontpath.c. Neither is ever linked,
-# configure exports only CUPS_CFLAGS / FONTCONFIG_CFLAGS (no *_LIBS exists), and
-# both libraries are dlopened at run time (libcups.so.2 from CUPSfuncs.c,
-# libfontconfig.so.1 from fontpath.c). So the headers are all the build needs, and
-# being pure API they serve every target. Stage them in a private include dir
-# instead of passing /usr/include, whose -I would be searched ahead of the
-# target's own libc headers and shadow them.
+# configure requires cups and fontconfig everywhere but windows/macosx, and
+# --enable-headless-only does not exempt them: libawt_headless compiles
+# CUPSfuncs.c and fontpath.c. Neither is ever linked (configure exports only the
+# *_CFLAGS, and both are dlopened at run time), so the headers are all that is
+# needed, and being pure API they serve every target. X11 rides along: 11, 17 and
+# 21 compile libawt against it whatever headless-only says, since rect.h includes
+# <X11/Xlib.h>; only the headful libawt_xawt links the libraries. 25 dropped that
+# include, where the extra -I is harmless.
 #
-# X11 rides along for the same reason. 11, 17 and 21 all compile libawt against
-# it whatever --enable-headless-only says, rect.h pulls in <X11/Xlib.h>, so the
-# build stops with "fatal error: 'X11/Xlib.h' file not found", while only the
-# headful libawt_xawt, which a headless build never produces, links against the
-# libraries. 25 dropped the include and needs none of this; the extra -I is
-# harmless there. Passing -I directly rather than through --x-includes is what
-# makes this work across all of them: 17 and 25 answer "X11 not needed" and
-# clear X_CFLAGS, so anything routed through configure's X11 support is dropped
-# before it reaches the compiler.
+# Stage them in a private include dir rather than passing /usr/include, whose -I
+# would be searched ahead of the target's own libc headers. Pass -I directly and
+# not through --x-includes: 17 and 25 answer "X11 not needed" and clear X_CFLAGS,
+# dropping anything routed through configure's X11 support.
 if [ "$TARGET_OS" = linux ] || [ "$TARGET_OS" = bsd ]; then
   DEP_INC="$BUILD_DIR/dep-include"
   for dep in cups fontconfig X11; do
@@ -2543,24 +2415,20 @@ export USER=builder
 log "Configuring JDK $JDK_VERSION for $TARGET ($JVM_VARIANT, $TARGET_OS)"
 cd "$SRC"
 if [ "$JDK_VERSION" = 8 ]; then
-  # jdk8u: legacy build system, the option set is smaller and spelled
-  # differently, but the intent matches common_conf above.
-  # --disable-headful: 8's spelling of --enable-headless-only; it also sets
-  # X11_NOT_NEEDED, so configure stops looking for X11 headers no cross sysroot
-  # here has. --with-freetype=bundled: 8u does accept it on every target OS
-  # (only the other bundled-lib toggles are missing), and without it configure
-  # goes looking for a system freetype. --enable-unlimited-crypto: ship the
-  # unlimited-strength JCE policy (default on 11+, opt-in on 8) so full-strength
-  # ciphers work out of the box. Neither --disable-warnings-as-errors nor
-  # --with-build-user exists yet in 8, and configure makes unknown options fatal,
-  # so both are left off. BUILD_CC/BUILD_CXX matter more here than on 11+:
-  # hotspot-spec.gmk.in maps BUILD_CXX onto hotspot's HOSTCXX, which builds adlc
-  #, and hotspot hands that host tool the *target* compiler's flags, so with the
-  # NDK clang as CXX it adds -flimit-debug-info and host g++ refuses it
-  # ("g++: error: unrecognized command-line option '-flimit-debug-info'").
-  # Building adlc with clang too keeps the flags and the compiler in agreement.
-  # --disable-headful for the same targets as --enable-headless-only above;
-  # windows and macosx build their native toolkits and need no X11.
+  # jdk8u: legacy build system, same intent as common_conf above in a smaller,
+  # differently spelled option set.
+  #   --disable-headful  8's --enable-headless-only; also sets X11_NOT_NEEDED.
+  #     Same targets as above: windows and macosx need no X11.
+  #   --with-freetype=bundled  accepted on every target OS here (the other
+  #     bundled-lib toggles are not), and without it configure hunts for a
+  #     system freetype.
+  #   --enable-unlimited-crypto  the JCE policy 11+ ships by default.
+  #   BUILD_CC/BUILD_CXX  hotspot-spec.gmk.in maps BUILD_CXX onto HOSTCXX, which
+  #     builds adlc, and hotspot hands that host tool the *target* compiler's
+  #     flags; with the NDK clang as CXX it adds -flimit-debug-info and host g++
+  #     refuses it. Building adlc with clang keeps flags and compiler agreeing.
+  # --disable-warnings-as-errors and --with-build-user do not exist in 8, and
+  # unknown options are fatal, so both are left off.
   conf8_headful=()
   case "$TARGET_OS" in
     windows|macosx) ;;
