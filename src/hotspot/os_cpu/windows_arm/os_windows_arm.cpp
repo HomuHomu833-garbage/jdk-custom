@@ -56,6 +56,26 @@
 # include <stdlib.h>
 # include <stdio.h>
 
+// cpu/arm/register_arm.hpp spells the Register constants as macros in 21 and
+// earlier, "#define R11 ((Register)11)", and windows names the same registers
+// in CONTEXT, so uc->R11 expands to uc->((Register)11) and stops the parse.
+// 25 made them constants instead. Nothing here wants the Register objects, so
+// take the thirteen names this file uses back. #undef of an undefined macro is
+// allowed, which keeps this quiet on the releases that need none of it.
+#undef R0
+#undef R1
+#undef R2
+#undef R3
+#undef R4
+#undef R5
+#undef R6
+#undef R7
+#undef R8
+#undef R9
+#undef R10
+#undef R11
+#undef R12
+
 // The ARM32 registers, spelled the way windows spells them in CONTEXT.
 // os_cpu/linux_arm reads the same ones out of a ucontext_t as gregs[15],
 // gregs[13] and gregs[11]. The interpreter keeps its bytecode pointer in r7,
