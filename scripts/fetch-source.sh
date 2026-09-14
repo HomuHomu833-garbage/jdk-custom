@@ -471,7 +471,60 @@ edit(oscpu, [
      "      intptr_t* sp = (intptr_t*)ctx->Sp;\n"
      "      address pc = (address)(ctx->Lr",
      "stack banging registers", 1),
+
+    # ARM64EC only maps the ARM64 registers that have an AMD64 slot to live in,
+    # so x13, x14, x16 to x18, x23, x24 and x28 are simply not in the context
+    # windows hands over. Print what there is rather than inventing values.
+    ('  st->print_cr("Registers:");\n'
+     '\n'
+     '  st->print(  "X0 =" INTPTR_FORMAT, uc->X0);',
+     '  st->print_cr("Registers:");\n'
+     '\n'
+     '#ifdef __arm64ec__\n'
+     '  // ARM64EC carries only the registers with an AMD64 slot: x13, x14,\n'
+     '  // x16 to x18, x23, x24 and x28 are not preserved across the boundary\n'
+     '  // and windows does not report them.\n'
+     '  const struct { const char* name; DWORD64 value; } ec_regs[] = {\n'
+     '    {"X0", uc->X0},   {"X1", uc->X1},   {"X2", uc->X2},   {"X3", uc->X3},\n'
+     '    {"X4", uc->X4},   {"X5", uc->X5},   {"X6", uc->X6},   {"X7", uc->X7},\n'
+     '    {"X8", uc->X8},   {"X9", uc->X9},   {"X10", uc->X10}, {"X11", uc->X11},\n'
+     '    {"X12", uc->X12}, {"X15", uc->X15}, {"X19", uc->X19}, {"X20", uc->X20},\n'
+     '    {"X21", uc->X21}, {"X22", uc->X22}, {"X25", uc->X25}, {"X26", uc->X26},\n'
+     '    {"X27", uc->X27}, {"FP", uc->Fp},   {"LR", uc->Lr},   {"SP", uc->Sp},\n'
+     '  };\n'
+     '  for (size_t i = 0; i < sizeof(ec_regs) / sizeof(ec_regs[0]); i++) {\n'
+     '    st->print("%-4s=" INTPTR_FORMAT, ec_regs[i].name, ec_regs[i].value);\n'
+     '    if ((i % 4) == 3) { st->cr(); } else { st->print(", "); }\n'
+     '  }\n'
+     '  st->cr();\n'
+     '#else\n'
+     '  st->print(  "X0 =" INTPTR_FORMAT, uc->X0);',
+     "print_context EC branch", 1),
+
+    ('  st->print(", X28=" INTPTR_FORMAT, uc->X28);\n'
+     '  st->cr();\n'
+     '  st->cr();\n'
+     '}',
+     '  st->print(", X28=" INTPTR_FORMAT, uc->X28);\n'
+     '  st->cr();\n'
+     '#endif\n'
+     '  st->cr();\n'
+     '}',
+     "print_context EC branch close", 1),
 ])
+
+# print_register_info walks X0 to X28 by index; leave a gap where ARM64EC has
+# no register. A missing case prints nothing and the walk still advances.
+missing = (13, 14, 16, 17, 18, 23, 24, 28)
+s = io.open(oscpu, encoding='utf-8', newline='').read()
+for r in missing:
+    old = '      CASE_PRINT_REG(%2d, "X%d=", X%d); break;\n' % (r, r, r)
+    if s.count(old) != 1:
+        old = '      CASE_PRINT_REG(%2d, " X%d=", X%d); break;\n' % (r, r, r)
+    if s.count(old) != 1:
+        raise SystemExit("os_windows_aarch64.cpp: no single CASE_PRINT_REG for X%d" % r)
+    s = s.replace(old, '#ifndef __arm64ec__\n' + old + '#endif\n', 1)
+io.open(oscpu, 'w', encoding='utf-8', newline='').write(s)
 
 print("arm64ec: shared and os_cpu context handling applied")
 PYEOF
