@@ -311,6 +311,27 @@ PYEOF
         ;;
     esac
 
+    # The Serviceability Agent's windbg back end handles x86_64 and ARM64 only:
+    #   sawindbg.cpp:40: error: "SA windbg back-end is not supported for your cpu!"
+    # configure already drops SA for zero, aix and s390x, so say so for 32-bit
+    # ARM on windows the same way rather than porting that back end. The
+    # condition tests the target, so it is inert for every other windows triple.
+    JDKOPT="$SRC/make/autoconf/jdk-options.m4"
+    if [ -f "$JDKOPT" ] && ! grep -q 'OPENJDK_TARGET_CPU" = xarm ; then' "$JDKOPT"; then
+      python3 - "$JDKOPT" <<'PYEOF'
+import io, sys
+p = sys.argv[1]
+s = io.open(p, encoding='utf-8', newline='').read()
+old = '  if test "x$OPENJDK_TARGET_CPU" = xs390x ; then\n    INCLUDE_SA=false\n  fi\n'
+new = old + ('  if test "x$OPENJDK_TARGET_OS" = xwindows && test "x$OPENJDK_TARGET_CPU" = xarm ; then\n'
+             '    INCLUDE_SA=false\n  fi\n')
+if s.count(old) != 1:
+    raise SystemExit("jdk-options.m4: the s390x INCLUDE_SA block matched %d times, expected 1" % s.count(old))
+io.open(p, 'w', encoding='utf-8', newline='').write(s.replace(old, new, 1))
+PYEOF
+      log "Leaving the serviceability agent out for 32-bit ARM on windows"
+    fi
+
     # sharedRuntimeRem.cpp defines SharedRuntime::fmod_winx64, which
     # sharedRuntime.hpp declares only under _WIN64, while the file itself is
     # compiled for every windows target:
