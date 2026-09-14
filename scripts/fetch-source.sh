@@ -201,6 +201,28 @@ if [ "${PLATFORM:-}" = windows ]; then
         ;;
     esac
 
+    # NMT's mapping printer declares its classes for LINUX, _WIN64 or APPLE,
+    # while memMapPrinter_windows.cpp implementing them is compiled for every
+    # windows target, so on a 32-bit one the class is not declared at all:
+    #   memMapPrinter_windows.cpp:148: unknown type name 'MappingPrintSession'
+    # _WIN64 stands in for "windows" in both files. The implementation only
+    # calls VirtualQuery and psapi, which 32-bit windows has, and its one
+    # width-sensitive line already casts through unsigned long long.
+    mmp_done=""
+    for f in "$SRC/src/hotspot/share/nmt/memMapPrinter.hpp" \
+             "$SRC/src/hotspot/share/nmt/memMapPrinter.cpp"; do
+      [ -f "$f" ] || continue
+      grep -q 'defined(_WIN64)' "$f" || continue
+      sed -i 's/defined(_WIN64)/defined(_WIN32)/g' "$f"
+      if grep -q 'defined(_WIN64)' "$f"; then
+        echo "failed to widen the NMT map printer guard in $f" >&2; exit 1
+      fi
+      mmp_done=yes
+    done
+    if [ -n "$mmp_done" ]; then
+      log "Declaring NMT's mapping printer for 32-bit windows too"
+    fi
+
     # adlc emits a check into its generated sources for every -D it was given,
     # so they fail to compile unless the same defines are set. 25 hands it
     # -D_WIN64=1 for any windows target, taking windows to mean 64-bit:
