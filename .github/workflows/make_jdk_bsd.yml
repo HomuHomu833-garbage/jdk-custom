@@ -30,4 +30,5 @@ jobs:
          "powerpc64le-freebsd-none", "riscv64-freebsd-none", "x86-freebsd-none",
          "x86-netbsd-none", "x86_64-freebsd-none", "x86_64-netbsd-none",
          "arm-openbsd-eabi", "powerpc-openbsd-eabihf", "riscv64-openbsd-none",
-         "x86-openbsd-none", "x86_64-openbsd-none"]
+         "x86-openbsd-none", "x86_64-openbsd-none", "riscv32-netbsd-none",
+         "riscv64-netbsd-none"]

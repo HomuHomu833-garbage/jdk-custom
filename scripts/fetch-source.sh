@@ -46,10 +46,14 @@ log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 # Download with retries: re-run aria2c on any failure so transient GitHub/Azul
 # 501/504 (and the like) recover, without relying on aria2's --retry-on-unknown
 # (older aria2 builds lack it). Pass aria2c args, e.g. --dir=/tmp -o f.zip URL.
+# --allow-overwrite/--auto-file-renaming: without them a retry parks the second
+# attempt beside the first as NAME.1 and leaves the partial NAME for the unpack
+# to trip over.
 fetch() {
   local i=0
   until aria2c --console-log-level=error --check-certificate=false \
-               --max-tries=5 --retry-wait=2 --connect-timeout=15 "$@"; do
+               --max-tries=5 --retry-wait=2 --connect-timeout=15 \
+               --allow-overwrite=true --auto-file-renaming=false "$@"; do
     i=$((i + 1)); [ "$i" -ge 5 ] && { echo "fetch: giving up after $i attempts" >&2; return 1; }
     echo "fetch: aria2c failed, retry $i/5 in 2s..." >&2; sleep 2
   done

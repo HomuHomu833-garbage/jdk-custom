@@ -12,9 +12,9 @@
 #     bash -c 'scripts/fetch-source.sh && scripts/build.sh && scripts/make-jdk.sh'
 FROM ubuntu:24.04
 
-ARG ZIG_VERSION=0.17.0-dev.1622+2b242157b
-ARG LLVM_MINGW_VERSION=20260505
-ARG MACOS_SDK_VERSION=15.5
+ARG ZIG_VERSION=0.17.0-dev.1978+c961124d9
+ARG LLVM_MINGW_VERSION=20260826
+ARG MACOS_SDK_VERSION=26.1
 ARG REPO_OWNER=HomuHomu833
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -40,7 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # fetch: aria2c with retries (transient GitHub/Adoptium 5xx). build scripts reuse it.
 RUN printf '%s\n' '#!/bin/sh' \
-    'i=0; until aria2c --console-log-level=error --check-certificate=false --max-tries=5 --retry-wait=2 --connect-timeout=15 "$@"; do' \
+    'i=0; until aria2c --console-log-level=error --check-certificate=false --max-tries=5 --retry-wait=2 --connect-timeout=15 --allow-overwrite=true --auto-file-renaming=false "$@"; do' \
     '  i=$((i+1)); [ "$i" -ge 5 ] && { echo "fetch: giving up after $i attempts" >&2; exit 1; }' \
     '  echo "fetch: aria2c failed, retry $i/5 in 2s..." >&2; sleep 2' \
     'done' > /usr/local/bin/fetch && chmod +x /usr/local/bin/fetch
