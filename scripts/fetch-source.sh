@@ -311,6 +311,23 @@ PYEOF
         ;;
     esac
 
+    # sharedRuntimeRem.cpp defines SharedRuntime::fmod_winx64, which
+    # sharedRuntime.hpp declares only under _WIN64, while the file itself is
+    # compiled for every windows target:
+    #   sharedRuntimeRem.cpp:40: out-of-line definition of 'fmod_winx64'
+    #   does not match any declaration in 'SharedRuntime'
+    # The guard is right: it is a workaround for the windows x64 CRT's fmod, so
+    # give the definition the same one. A no-op on the 64-bit targets.
+    SRR="$SRC/src/hotspot/os/windows/sharedRuntimeRem.cpp"
+    if [ -f "$SRR" ] && ! grep -q '^#ifdef _WIN64$' "$SRR"; then
+      sed -i 's|^#include "runtime/sharedRuntime.hpp"$|#include "runtime/sharedRuntime.hpp"\n\n#ifdef _WIN64|' "$SRR"
+      printf '#endif // _WIN64\n' >> "$SRR"
+      if [ "$(grep -c '^#ifdef _WIN64$' "$SRR")" != 1 ] || [ "$(grep -c '^#endif // _WIN64$' "$SRR")" != 1 ]; then
+        echo "failed to guard fmod_winx64 on _WIN64" >&2; exit 1
+      fi
+      log "Guarding fmod_winx64 the way its declaration is guarded"
+    fi
+
     # NMT's mapping printer declares its classes for LINUX, _WIN64 or APPLE,
     # while memMapPrinter_windows.cpp implementing them is compiled for every
     # windows target, so on a 32-bit one the class is not declared at all:
