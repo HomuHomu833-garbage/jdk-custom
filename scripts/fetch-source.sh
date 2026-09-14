@@ -309,6 +309,173 @@ io.open(path, 'w', encoding='utf-8', newline='').write(s)
 PYEOF
         log "Giving os_windows.cpp its 32-bit ARM branches"
         ;;
+      arm64ec-w64-mingw32)
+        # ARM64EC is the x64-compatible ABI on ARM64 hardware, so windows hands
+        # out an AMD64-shaped CONTEXT and clang defines _M_AMD64. hotspot is
+        # built for aarch64, so os_windows_aarch64.cpp asks a CONTEXT for Pc and
+        # X0 that are not there, while the shared file takes its AMD64 arms into
+        # an x86 Assembler and VM_Version:
+        #   os_windows_aarch64.cpp:83: no member named 'Pc' in '_CONTEXT'
+        #   os_windows.cpp: no member named 'REX' in 'Assembler'
+        # ARM64EC_NT_CONTEXT names the same bytes with the ARM64 registers, so
+        # the fix is to read the context through it and to send every
+        # arch-specific site down the aarch64 arm.
+        python3 - "$SRC/src/hotspot/os/windows/os_windows.cpp" \n                 "$SRC/src/hotspot/os_cpu/windows_aarch64/os_windows_aarch64.cpp" <<'PYEOF'
+import io, sys
+
+shared, oscpu = sys.argv[1], sys.argv[2]
+
+def edit(path, subs):
+    s = io.open(path, encoding='utf-8', newline='').read()
+    for old, new, label, want in subs:
+        n = s.count(old)
+        if n != want:
+            raise SystemExit("%s: %s matched %d times, expected %d"
+                             % (path.split('/')[-1], label, n, want))
+        s = s.replace(old, new)
+    io.open(path, 'w', encoding='utf-8', newline='').write(s)
+
+# An ARM64EC process is x64-compatible, so every CONTEXT windows hands us is the
+# AMD64 structure. ARM64EC_NT_CONTEXT names the same bytes with the ARM64
+# registers (X0 sits in Rcx, Sp in Rsp, Pc in Rip), so this is a
+# reinterpretation and not a conversion. HS_ARM64_CTX is the identity anywhere
+# else, which lets the shared accesses below stay in one form.
+CTX_MACRO = """
+#if defined(__arm64ec__)
+  #define HS_ARM64_CTX(c) ((PARM64EC_NT_CONTEXT)(c))
+#else
+  #define HS_ARM64_CTX(c) (c)
+#endif
+"""
+
+edit(shared, [
+    # Take the aarch64 arm everywhere the target is ARM64EC: hotspot is built
+    # for aarch64, so the AMD64 arms reference an x86 Assembler and VM_Version
+    # that are not there, even though the context layout is AMD64's.
+    ("#if defined(_M_ARM64)\n  #define __CPU__ aarch64\n",
+     CTX_MACRO +
+     "\n#if defined(_M_ARM64) || defined(__arm64ec__)\n  #define __CPU__ aarch64\n",
+     "__CPU__ and the context macro", 1),
+
+    ("#if (defined _M_ARM64)\n  static const uint16_t running_arch = IMAGE_FILE_MACHINE_ARM64;\n",
+     "#if (defined _M_ARM64) || (defined __arm64ec__)\n"
+     "  static const uint16_t running_arch = IMAGE_FILE_MACHINE_ARM64;\n",
+     "running_arch", 1),
+
+    ("#if defined(_M_ARM64)\n  #define PC_NAME Pc\n",
+     "#if defined(_M_ARM64) || defined(__arm64ec__)\n  #define PC_NAME Pc\n",
+     "PC_NAME", 1),
+
+    # Both Handle_Exception accesses go through the macro. On every other target
+    # it expands to nothing.
+    ("  if (thread != nullptr && thread->is_Java_thread()) {\n"
+     "    JavaThread::cast(thread)->set_saved_exception_pc((address)(DWORD_PTR)exceptionInfo->ContextRecord->PC_NAME);",
+     "  if (thread != nullptr && thread->is_Java_thread()) {\n"
+     "    JavaThread::cast(thread)->set_saved_exception_pc((address)(DWORD_PTR)HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME);",
+     "saved_exception_pc", 1),
+
+    ("  exceptionInfo->ContextRecord->PC_NAME = (DWORD64)handler;",
+     "  HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME = (DWORD64)handler;",
+     "PC_NAME assignment", 1),
+
+    # The deopt patch sits outside any arch conditional, so it needs the macro
+    # as well.
+    ("          exceptionInfo->ContextRecord->PC_NAME = (DWORD64)deopt;",
+     "          HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME = (DWORD64)deopt;",
+     "deopt PC_NAME assignment", 1),
+
+    # clang defines _M_AMD64 for ARM64EC, so these two blocks, which are not
+    # part of an #elif chain, would otherwise compile and call into an x86
+    # VM_Version and an x86 floating point handler that an aarch64 hotspot
+    # does not have.
+    ("#if defined(_M_AMD64)\n"
+     "  if ((exception_code == EXCEPTION_ACCESS_VIOLATION) &&\n"
+     "      VM_Version::is_cpuinfo_segv_addr(pc)) {",
+     "#if defined(_M_AMD64) && !defined(__arm64ec__)\n"
+     "  if ((exception_code == EXCEPTION_ACCESS_VIOLATION) &&\n"
+     "      VM_Version::is_cpuinfo_segv_addr(pc)) {",
+     "cpuinfo probe block", 1),
+
+    ("#if defined(_M_AMD64)\n"
+     "    extern bool handle_FLT_exception(struct _EXCEPTION_POINTERS* exceptionInfo);",
+     "#if defined(_M_AMD64) && !defined(__arm64ec__)\n"
+     "    extern bool handle_FLT_exception(struct _EXCEPTION_POINTERS* exceptionInfo);",
+     "handle_FLT_exception block", 1),
+
+    ("#if defined(_M_ARM64)\n"
+     "  PCONTEXT ctx = exceptionInfo->ContextRecord;\n"
+     "  address pc = (address)ctx->Sp;\n",
+     "#if defined(_M_ARM64) || defined(__arm64ec__)\n"
+     "  auto ctx = HS_ARM64_CTX(exceptionInfo->ContextRecord);\n"
+     "  address pc = (address)ctx->Sp;\n",
+     "Handle_IDiv_Exception", 1),
+
+    # The pc in topLevelExceptionFilter and topLevelVectoredExceptionFilter,
+    # which spell this identically.
+    ("#if defined(_M_ARM64)\n"
+     "  address pc = (address) exceptionInfo->ContextRecord->Pc;\n",
+     "#if defined(_M_ARM64) || defined(__arm64ec__)\n"
+     "  address pc = (address) HS_ARM64_CTX(exceptionInfo->ContextRecord)->Pc;\n",
+     "top level filter pc", 2),
+
+    ("#ifdef _M_ARM64\n    if (in_java &&\n",
+     "#if defined(_M_ARM64) || defined(__arm64ec__)\n    if (in_java &&\n",
+     "sigill not_entrant", 1),
+
+    # topLevelUnhandledExceptionFilter, whose fallback reads Eip.
+    ("#if defined(_M_ARM64)\n"
+     "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n",
+     "#if defined(_M_ARM64) || defined(__arm64ec__)\n"
+     "    address pc = (address) HS_ARM64_CTX(exceptionInfo->ContextRecord)->Pc;\n",
+     "unhandled filter pc", 1),
+
+    # ARM64EC runs on ARM64 hardware, so it has the same 48-bit address space.
+    ("#ifdef _M_ARM64\n  // AArch64 has a maximum addressable space of 48-bits\n",
+     "#if defined(_M_ARM64) || defined(__arm64ec__)\n"
+     "  // AArch64 has a maximum addressable space of 48-bits\n",
+     "max addressable space", 1),
+
+    ("#if defined(AMD64) || defined(_M_ARM64)\n"
+     "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n",
+     "#if defined(AMD64) || defined(_M_ARM64) || defined(__arm64ec__)\n"
+     "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n",
+     "sampling_context_flags", 1),
+])
+
+# The os_cpu file reads the ARM64 registers by name throughout, so give it one
+# type to work in.
+OSCPU_TYPEDEF = """
+// See the note on HS_ARM64_CTX in os_windows.cpp: on ARM64EC the CONTEXT
+// windows delivers is the AMD64 one, and ARM64EC_NT_CONTEXT is the same bytes
+// under the ARM64 register names.
+#if defined(__arm64ec__)
+typedef ARM64EC_NT_CONTEXT HotSpotContext;
+#else
+typedef CONTEXT HotSpotContext;
+#endif
+"""
+
+edit(oscpu, [
+    ("#define REG_BCP X22\n", "#define REG_BCP X22\n" + OSCPU_TYPEDEF, "HotSpotContext typedef", 1),
+    ("  CONTEXT* uc = (CONTEXT*)ucVoid;", "  HotSpotContext* uc = (HotSpotContext*)ucVoid;", "uc casts", 2),
+    ("static bool is_interpreter(const CONTEXT* uc) {",
+     "static bool is_interpreter(const HotSpotContext* uc) {", "is_interpreter", 1),
+    ("  const CONTEXT* uc = (const CONTEXT*)context;",
+     "  const HotSpotContext* uc = (const HotSpotContext*)context;", "const uc casts", 2),
+    ("      intptr_t* fp = (intptr_t*)exceptionInfo->ContextRecord->Fp;\n"
+     "      intptr_t* sp = (intptr_t*)exceptionInfo->ContextRecord->Sp;\n"
+     "      address pc = (address)(exceptionInfo->ContextRecord->Lr",
+     "      HotSpotContext* ctx = (HotSpotContext*)exceptionInfo->ContextRecord;\n"
+     "      intptr_t* fp = (intptr_t*)ctx->Fp;\n"
+     "      intptr_t* sp = (intptr_t*)ctx->Sp;\n"
+     "      address pc = (address)(ctx->Lr",
+     "stack banging registers", 1),
+])
+
+print("arm64ec: shared and os_cpu context handling applied")
+PYEOF
+        log "Reading the ARM64EC context as ARM64 and taking the aarch64 arms"
+        ;;
     esac
 
     # The Serviceability Agent's windbg back end handles x86_64 and ARM64 only:
