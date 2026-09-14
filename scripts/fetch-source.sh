@@ -213,16 +213,22 @@ path = sys.argv[1]
 s = io.open(path, encoding='utf-8', newline='').read()
 orig = s
 
+# Every site below inserts an arm after the _M_AMD64 one rather than before the
+# closing #else, because only the #else differs across releases: 25 ends these
+# chains with #error, while 21 and earlier still carry an _M_IX86 arm. Anchoring
+# on the AMD64 arm makes one patch serve every version, and each substitution
+# still insists on an exact number of matches.
 def sub(old, new, label, want=1):
     global s
-    if s.count(old) != want:
+    n = s.count(old)
+    if n != want:
         raise SystemExit("os_windows.cpp: %s matched %d times, expected %d"
-                         % (label, s.count(old), want))
+                         % (label, n, want))
     s = s.replace(old, new)
 
 # The arch name in the fatal error header.
-sub("  #define __CPU__ amd64\n#else\n",
-    "  #define __CPU__ amd64\n#elif defined(_M_ARM)\n  #define __CPU__ arm\n#else\n",
+sub("  #define __CPU__ amd64\n",
+    "  #define __CPU__ amd64\n#elif defined(_M_ARM)\n  #define __CPU__ arm\n",
     "__CPU__")
 
 # dll_load's architecture check. ARMNT is the machine code windows gives a
@@ -232,15 +238,15 @@ sub('    {IMAGE_FILE_MACHINE_ARM64,     (char*)"ARM 64"}\n  };',
     '    {IMAGE_FILE_MACHINE_ARMNT,     (char*)"ARM 32"}\n  };',
     "arch_array")
 
-sub("  static const uint16_t running_arch = IMAGE_FILE_MACHINE_AMD64;\n#else\n",
+sub("  static const uint16_t running_arch = IMAGE_FILE_MACHINE_AMD64;\n",
     "  static const uint16_t running_arch = IMAGE_FILE_MACHINE_AMD64;\n"
     "#elif (defined _M_ARM)\n"
-    "  static const uint16_t running_arch = IMAGE_FILE_MACHINE_ARMNT;\n#else\n",
+    "  static const uint16_t running_arch = IMAGE_FILE_MACHINE_ARMNT;\n",
     "running_arch")
 
 # The program counter's name in CONTEXT.
-sub("  #define PC_NAME Rip\n#else\n",
-    "  #define PC_NAME Rip\n#elif defined(_M_ARM)\n  #define PC_NAME Pc\n#else\n",
+sub("  #define PC_NAME Rip\n",
+    "  #define PC_NAME Rip\n#elif defined(_M_ARM)\n  #define PC_NAME Pc\n",
     "PC_NAME")
 
 # DWORD64 truncates where CONTEXT::Pc is 32 bits; DWORD_PTR is pointer-sized on
@@ -252,26 +258,41 @@ sub("  exceptionInfo->ContextRecord->PC_NAME = (DWORD64)handler;",
 # ARM does not trap on integer division: sdiv yields min_jint for min_jint/-1
 # and a zero divisor is tested before the divide, so this cannot be reached.
 sub("  ctx->Rdx = (DWORD)0;             // remainder\n"
-    "  // Continue the execution\n"
-    "#else\n  #error unknown architecture\n#endif\n",
+    "  // Continue the execution\n",
     "  ctx->Rdx = (DWORD)0;             // remainder\n"
     "  // Continue the execution\n"
     "#elif defined(_M_ARM)\n"
     "  // ARM does not trap on integer division: sdiv yields min_jint for\n"
     "  // min_jint/-1, and a zero divisor is checked before the divide.\n"
-    "  ShouldNotReachHere();\n"
-    "#else\n  #error unknown architecture\n#endif\n",
+    "  ShouldNotReachHere();\n",
     "Handle_IDiv_Exception")
 
 # The pc in topLevelExceptionFilter and topLevelVectoredExceptionFilter, which
-# spell this block identically, hence both.
-sub("  address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
-    "#else\n  #error unknown architecture\n#endif\n",
+# spell this identically, hence both.
+sub("#if defined(_M_ARM64)\n"
+    "  address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
+    "#elif defined(_M_AMD64)\n"
+    "  address pc = (address) exceptionInfo->ContextRecord->Rip;\n",
+    "#if defined(_M_ARM64)\n"
+    "  address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
+    "#elif defined(_M_AMD64)\n"
     "  address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
     "#elif defined(_M_ARM)\n"
-    "  address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
-    "#else\n  #error unknown architecture\n#endif\n",
+    "  address pc = (address) exceptionInfo->ContextRecord->Pc;\n",
     "top level filter pc", want=2)
+
+# topLevelUnhandledExceptionFilter, one indent deeper.
+sub("#if defined(_M_ARM64)\n"
+    "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
+    "#elif defined(_M_AMD64)\n"
+    "    address pc = (address) exceptionInfo->ContextRecord->Rip;\n",
+    "#if defined(_M_ARM64)\n"
+    "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
+    "#elif defined(_M_AMD64)\n"
+    "    address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
+    "#elif defined(_M_ARM)\n"
+    "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n",
+    "unhandled filter pc")
 
 # Assembler::locate_next_instruction exists on aarch64 and x86 but not on
 # 32-bit ARM, where every instruction is the same width. os_cpu/linux_arm
@@ -284,24 +305,13 @@ sub("        address next_pc =  Assembler::locate_next_instruction(pc);",
     "#endif",
     "locate_next_instruction")
 
-# The thread-sampling context flags are defined for AMD64 and ARM64 only, and
-# the function using them is compiled for every windows target.
-sub("#if defined(AMD64) || defined(_M_ARM64)\n"
-    "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n"
-    "#endif\n",
-    "#if defined(AMD64) || defined(_M_ARM64) || defined(_M_ARM)\n"
-    "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n"
-    "#endif\n",
+# The thread-sampling context flags. 21 puts an IA32 arm ahead of this one, so
+# match the condition itself rather than the directive in front of it.
+sub("defined(AMD64) || defined(_M_ARM64)\n"
+    "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n",
+    "defined(AMD64) || defined(_M_ARM64) || defined(_M_ARM)\n"
+    "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n",
     "sampling_context_flags")
-
-# The unhandled filter falls back to Eip, which only an x86-32 CONTEXT has.
-sub("    address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
-    "#else\n    address pc = (address) exceptionInfo->ContextRecord->Eip;\n#endif\n",
-    "    address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
-    "#elif defined(_M_ARM)\n"
-    "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
-    "#else\n    address pc = (address) exceptionInfo->ContextRecord->Eip;\n#endif\n",
-    "unhandled filter pc")
 
 if s == orig:
     raise SystemExit("os_windows.cpp: nothing changed")
@@ -330,11 +340,30 @@ def edit(path, subs):
     s = io.open(path, encoding='utf-8', newline='').read()
     for old, new, label, want in subs:
         n = s.count(old)
-        if n != want:
+        # want is an exact count, None for "one or more", or "optional" for a
+        # site only some releases have. Releases differ in how often a form
+        # appears, so a fixed count is not always the right check.
+        if want == "optional":
+            if n:
+                s = s.replace(old, new)
+            continue
+        if want is None:
+            if n == 0:
+                raise SystemExit("%s: %s matched nothing" % (path.split('/')[-1], label))
+        elif n != want:
             raise SystemExit("%s: %s matched %d times, expected %d"
                              % (path.split('/')[-1], label, n, want))
         s = s.replace(old, new)
     io.open(path, 'w', encoding='utf-8', newline='').write(s)
+
+def alt(path, cands, label):
+    # exactly one release-specific spelling must match
+    s = io.open(path, encoding='utf-8', newline='').read()
+    for old, new in cands:
+        if s.count(old) == 1:
+            io.open(path, 'w', encoding='utf-8', newline='').write(s.replace(old, new, 1))
+            return
+    raise SystemExit("%s: %s matched no known form" % (path.split('/')[-1], label))
 
 # An ARM64EC process is x64-compatible, so every CONTEXT windows hands us is the
 # AMD64 structure. ARM64EC_NT_CONTEXT names the same bytes with the ARM64
@@ -380,28 +409,10 @@ edit(shared, [
      "PC_NAME assignment", 1),
 
     # The deopt patch sits outside any arch conditional, so it needs the macro
-    # as well.
+    # as well. Only releases with the UD deopt trap have it.
     ("          exceptionInfo->ContextRecord->PC_NAME = (DWORD64)deopt;",
      "          HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME = (DWORD64)deopt;",
-     "deopt PC_NAME assignment", 1),
-
-    # clang defines _M_AMD64 for ARM64EC, so these two blocks, which are not
-    # part of an #elif chain, would otherwise compile and call into an x86
-    # VM_Version and an x86 floating point handler that an aarch64 hotspot
-    # does not have.
-    ("#if defined(_M_AMD64)\n"
-     "  if ((exception_code == EXCEPTION_ACCESS_VIOLATION) &&\n"
-     "      VM_Version::is_cpuinfo_segv_addr(pc)) {",
-     "#if defined(_M_AMD64) && !defined(__arm64ec__)\n"
-     "  if ((exception_code == EXCEPTION_ACCESS_VIOLATION) &&\n"
-     "      VM_Version::is_cpuinfo_segv_addr(pc)) {",
-     "cpuinfo probe block", 1),
-
-    ("#if defined(_M_AMD64)\n"
-     "    extern bool handle_FLT_exception(struct _EXCEPTION_POINTERS* exceptionInfo);",
-     "#if defined(_M_AMD64) && !defined(__arm64ec__)\n"
-     "    extern bool handle_FLT_exception(struct _EXCEPTION_POINTERS* exceptionInfo);",
-     "handle_FLT_exception block", 1),
+     "deopt PC_NAME assignment", "optional"),
 
     ("#if defined(_M_ARM64)\n"
      "  PCONTEXT ctx = exceptionInfo->ContextRecord;\n"
@@ -421,7 +432,7 @@ edit(shared, [
 
     ("#ifdef _M_ARM64\n    if (in_java &&\n",
      "#if defined(_M_ARM64) || defined(__arm64ec__)\n    if (in_java &&\n",
-     "sigill not_entrant", 1),
+     "sigill not_entrant", "optional"),
 
     # topLevelUnhandledExceptionFilter, whose fallback reads Eip.
     ("#if defined(_M_ARM64)\n"
@@ -440,8 +451,44 @@ edit(shared, [
      "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n",
      "#if defined(AMD64) || defined(_M_ARM64) || defined(__arm64ec__)\n"
      "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n",
-     "sampling_context_flags", 1),
+     "sampling_context_flags", "optional"),
+
+    ("#elif defined(AMD64) || defined(_M_ARM64)\n"
+     "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n",
+     "#elif defined(AMD64) || defined(_M_ARM64) || defined(__arm64ec__)\n"
+     "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n",
+     "sampling_context_flags (with an IA32 arm ahead of it)", "optional"),
 ])
+
+# clang defines _M_AMD64 for ARM64EC, so these two blocks, which are not part of
+# an #elif chain, would otherwise compile and call into an x86 VM_Version and an
+# x86 floating point handler that an aarch64 hotspot does not have. 21 and
+# earlier spell both conditions with _M_IX86 alongside.
+alt(shared, [
+    ("#if defined(_M_AMD64)\n"
+     "  if ((exception_code == EXCEPTION_ACCESS_VIOLATION) &&\n"
+     "      VM_Version::is_cpuinfo_segv_addr(pc)) {",
+     "#if defined(_M_AMD64) && !defined(__arm64ec__)\n"
+     "  if ((exception_code == EXCEPTION_ACCESS_VIOLATION) &&\n"
+     "      VM_Version::is_cpuinfo_segv_addr(pc)) {"),
+    ("#if defined(_M_AMD64) || defined(_M_IX86)\n"
+     "  if ((exception_code == EXCEPTION_ACCESS_VIOLATION) &&\n"
+     "      VM_Version::is_cpuinfo_segv_addr(pc)) {",
+     "#if (defined(_M_AMD64) || defined(_M_IX86)) && !defined(__arm64ec__)\n"
+     "  if ((exception_code == EXCEPTION_ACCESS_VIOLATION) &&\n"
+     "      VM_Version::is_cpuinfo_segv_addr(pc)) {"),
+], "cpuinfo probe block")
+
+alt(shared, [
+    ("#if defined(_M_AMD64)\n"
+     "    extern bool handle_FLT_exception(struct _EXCEPTION_POINTERS* exceptionInfo);",
+     "#if defined(_M_AMD64) && !defined(__arm64ec__)\n"
+     "    extern bool handle_FLT_exception(struct _EXCEPTION_POINTERS* exceptionInfo);"),
+    ("#if defined(_M_AMD64) || defined(_M_IX86)\n"
+     "    if ((in_java || in_native) && handle_FLT_exception(exceptionInfo)) {",
+     "#if (defined(_M_AMD64) || defined(_M_IX86)) && !defined(__arm64ec__)\n"
+     "    if ((in_java || in_native) && handle_FLT_exception(exceptionInfo)) {"),
+], "handle_FLT_exception block")
 
 # The os_cpu file reads the ARM64 registers by name throughout, so give it one
 # type to work in.
@@ -457,12 +504,16 @@ typedef CONTEXT HotSpotContext;
 """
 
 edit(oscpu, [
-    ("#define REG_BCP X22\n", "#define REG_BCP X22\n" + OSCPU_TYPEDEF, "HotSpotContext typedef", 1),
-    ("  CONTEXT* uc = (CONTEXT*)ucVoid;", "  HotSpotContext* uc = (HotSpotContext*)ucVoid;", "uc casts", 2),
+    ("void os::os_exception_wrapper(java_call_t f,",
+     OSCPU_TYPEDEF + "\nvoid os::os_exception_wrapper(java_call_t f,",
+     "HotSpotContext typedef", 1),
+    # 21 predates fetch_bcp_from_context, so it has one cast where 25 has two.
+    ("  CONTEXT* uc = (CONTEXT*)ucVoid;", "  HotSpotContext* uc = (HotSpotContext*)ucVoid;",
+     "uc casts", None),
     ("static bool is_interpreter(const CONTEXT* uc) {",
-     "static bool is_interpreter(const HotSpotContext* uc) {", "is_interpreter", 1),
+     "static bool is_interpreter(const HotSpotContext* uc) {", "is_interpreter", "optional"),
     ("  const CONTEXT* uc = (const CONTEXT*)context;",
-     "  const HotSpotContext* uc = (const HotSpotContext*)context;", "const uc casts", 2),
+     "  const HotSpotContext* uc = (const HotSpotContext*)context;", "const uc casts", None),
     ("      intptr_t* fp = (intptr_t*)exceptionInfo->ContextRecord->Fp;\n"
      "      intptr_t* sp = (intptr_t*)exceptionInfo->ContextRecord->Sp;\n"
      "      address pc = (address)(exceptionInfo->ContextRecord->Lr",
