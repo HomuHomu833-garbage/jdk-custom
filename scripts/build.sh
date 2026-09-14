@@ -632,7 +632,21 @@ if [ "$JDK_VERSION" = 8 ]; then
   # actually looking for.
   make BUILD_HEADLESS_ONLY=true images
 else
-  make CONF="$CONF" images
+  # A #error in a generated source names the generated file, which is gone from
+  # the log by the time it is read and is not in the repository to grep. Print
+  # the directive with its surrounding conditional so the next failure carries
+  # its own cause.
+  make CONF="$CONF" images || {
+    rc=$?
+    for g in "$SRC/build/$CONF/hotspot/variant-"*/gensrc/adfiles/*.cpp \
+             "$SRC/build/$CONF/hotspot/variant-"*/gensrc/adfiles/*.hpp; do
+      [ -f "$g" ] || continue
+      grep -q '#[[:space:]]*error' "$g" || continue
+      echo "=== generated $(basename "$g"): #error directives in context ==="
+      grep -n -B12 '#[[:space:]]*error' "$g" | head -60
+    done
+    exit "$rc"
+  }
 fi
 
 [ -d "$IMAGE_DIR" ] || { echo "expected JDK image not found at $IMAGE_DIR" >&2; exit 1; }

@@ -201,6 +201,21 @@ if [ "${PLATFORM:-}" = windows ]; then
         ;;
     esac
 
+    # windef.h still defines the 16-bit memory-model keywords, so "far" expands
+    # to nothing and adlc's generated ad_arm.cpp gets "bool  = ...":
+    #   ad_arm.cpp:89: error: expected unqualified-id
+    # Three locals in arm_32.ad are named far. Renaming them is smaller than
+    # undefining a macro windows headers expect to own. arm.ad has none.
+    ARMAD="$SRC/src/hotspot/cpu/arm/arm_32.ad"
+    if [ -f "$ARMAD" ] && grep -q 'bool far = ' "$ARMAD"; then
+      sed -i -e 's/bool far = /bool is_far = /g' \
+             -e 's/(far ? 3 : 1)/(is_far ? 3 : 1)/g' "$ARMAD"
+      if grep -qE '\bfar\b' <(grep -vE 'maybe_far_call|far_call' "$ARMAD"); then
+        echo "arm_32.ad still names a local far after the rename" >&2; exit 1
+      fi
+      log "Renaming arm_32.ad's far locals, which windef.h defines away"
+    fi
+
     # Two configure assumptions keyed on the target OS rather than on the build
     # host or the compiler:
     #   basic.m4 runs BASIC_SETUP_PATHS_WINDOWS whenever the target is windows,
