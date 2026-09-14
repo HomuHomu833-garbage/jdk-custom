@@ -77,34 +77,15 @@ if [ -d "$INSTALL_DIR/$JDK_VERSION-$TARGET" ]; then
     log "JDK $JDK_VERSION already built for $TARGET"; exit 0
 fi
 
-# --- HotSpot variant by target CPU ------------------------------------------
-# HotSpot ships an optimized JIT/template interpreter only for a fixed CPU set;
-# everything else falls back to the portable Zero interpreter so the build still
-# yields a runnable JDK. loongarch64 has an upstream HotSpot port from 21 on.
-case "$ARCH" in
-  i686|x86)
-    # JEP 503 deleted the 32-bit x86 port in 25, so configure there stops at
-    # "32-bit x86 builds are not supported" until that port is restored. Zero
-    # would get past it, but an interpreter-only JDK is not what this target is
-    # for, so let it fail where the real work is rather than degrade quietly.
-    JVM_VARIANT=server ;;
-  arm|armeb|armhf|armv7|armv7a|thumb|thumbeb)
-    # 8 has no 32-bit ARM HotSpot to build: jdk8u mainline ships cpu ports for
-    # aarch64, ppc, sparc, x86 and zero only, JDK 8's ARM32 JIT lived in
-    # Oracle's separate arm-port forest and never landed here. Left on server it
-    # picks up no arch at all and compiles the VM with the i486 flags
-    # ("unsupported argument 'i586' to option '-march='"). 11+ carry
-    # src/hotspot/cpu/arm, so they keep the JIT.
-    if [ "$JDK_VERSION" = 8 ]; then JVM_VARIANT=zero; else JVM_VARIANT=server; fi ;;
-  aarch64|aarch64_be|arm64|arm64e|arm64ec|powerpc64|powerpc64le|ppc64|ppc64le|riscv64|s390x|x86_64|x86_64h)
-    JVM_VARIANT=server ;;
-  loongarch64)
-    if [ "$JDK_VERSION" -ge 21 ] 2>/dev/null; then JVM_VARIANT=server; else JVM_VARIANT=zero; fi ;;
-  mips|mipsel|mips64|mips64el)
-    if [ "$JDK_VERSION" -le 15 ] 2>/dev/null; then JVM_VARIANT=server; else JVM_VARIANT=zero; fi ;;
-  *)
-    JVM_VARIANT=zero ;;
-esac
+# --- HotSpot variant --------------------------------------------------------
+# Server everywhere. Zero builds, but an interpreter-only JDK is not what any of
+# these targets is for, so a CPU without a JIT port should fail where the port is
+# missing rather than quietly produce one. Set JVM_VARIANT to override.
+#
+# Known to have no upstream JIT, for when this is revisited: 32-bit x86 on 25
+# (JEP 503 deleted it), 32-bit ARM on 8 (its JIT lived in Oracle's arm-port
+# forest and never landed in jdk8u), loongarch64 before 21, mips after 15.
+JVM_VARIANT="${JVM_VARIANT:-server}"
 
 # --- per-platform toolchain -------------------------------------------------
 # Dispatch on PLATFORM (not the triple) so the toolchain is chosen explicitly.
@@ -156,8 +137,9 @@ case "$PLATFORM" in
     # declares VALID_TOOLCHAINS_windows="microsoft", and the windows halves of
     # the makefiles are written around MSVC conventions (.obj, link.exe, LIB,
     # MT, RC, manifests). Everything below rewrites those three assumptions in
-    # the fetched tree. 25 and 21 build and publish x86_64 and aarch64; i686 is
-    # excluded for both (see make_jdk_windows.yml), 17 is in progress.
+    # the fetched tree. 11, 17, 21 and 25 all build and publish x86_64 and
+    # aarch64; i686, armv7 and arm64ec need hotspot ports (see
+    # make_jdk_windows.yml).
     TC=/opt/llvm-mingw
     export CC="$TC/bin/${TARGET}-clang" CXX="$TC/bin/${TARGET}-clang++"
     EXTRA_CONF+=(AR="$TC/bin/${TARGET}-ar" NM="$TC/bin/${TARGET}-nm" STRIP="$TC/bin/${TARGET}-strip" OBJCOPY="$TC/bin/${TARGET}-objcopy" OBJDUMP="$TC/bin/${TARGET}-objdump")
@@ -166,6 +148,14 @@ case "$PLATFORM" in
 
     CASE_INC="$BUILD_DIR/mingw-case-include"
     MINGW_INC="$TC/$TARGET/include"
+    # llvm-mingw ships no sysroot of its own for arm64ec, which uses the aarch64
+    # headers. Without this the whole shim below is skipped, and the first thing
+    # to miss it is clang's own arm64intr.h, whose #include_next then has nothing
+    # to find.
+    if [ ! -d "$MINGW_INC" ] && [ -d "$TC/aarch64-w64-mingw32/include" ]; then
+      MINGW_INC="$TC/aarch64-w64-mingw32/include"
+      log "Using the aarch64 mingw headers for $TARGET"
+    fi
     if [ -d "$MINGW_INC" ]; then
       rm -rf "$CASE_INC"; mkdir -p "$CASE_INC"
       grep -rhoE '#[[:space:]]*include[[:space:]]*<[A-Za-z0-9_]+\.h>' "$SRC/src" 2>/dev/null \
