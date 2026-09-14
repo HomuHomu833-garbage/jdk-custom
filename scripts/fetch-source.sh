@@ -41,6 +41,20 @@ PATCHES_DIR="${PATCHES_DIR:-$SCRIPT_DIR/../patches}"
 SRC="${SRC:-$ROOTDIR/jdk-src}"
 BOOT_JDK="${BOOT_JDK:-$ROOTDIR/boot-jdk}"
 
+# Shared with build.sh, which recomputes the same paths from $ROOTDIR.
+BUILD_DIR="${BUILD_DIR:-$ROOTDIR/build}"
+# OpenJDK's own name for the target OS, which is what the source layout and the
+# makefiles key on. build.sh derives the same value from the same two inputs.
+case "${PLATFORM:-}" in
+  linux|android) TARGET_OS=linux ;;
+  bsd)           TARGET_OS=bsd ;;
+  windows)       TARGET_OS=windows ;;
+  macos)         TARGET_OS=macosx ;;
+  *)             TARGET_OS="" ;;
+esac
+MINIAUDIO_VERSION="${MINIAUDIO_VERSION:-0.11.25}"
+MINIAUDIO_BACKEND="${MINIAUDIO_BACKEND:-$SCRIPT_DIR/../src/libjsound/PLATFORM_API_MiniAudio_PCM.c}"
+
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
 # Download with retries so transient GitHub/Azul 5xx recover; aria2's own
@@ -155,6 +169,230 @@ apply_set() {
 }
 [ -n "${PATCHSET:-}" ] && apply_set "$PATCHES_DIR/$PATCHSET/jdk/$JDK_VERSION" loose
 apply_set "$PATCHES_DIR/global/jdk/$JDK_VERSION" strict
+
+# --- sound: ALSA out, miniaudio in ------------------------------------------
+# miniaudio (src/libjsound/PLATFORM_API_MiniAudio_PCM.c) is the PCM provider on
+# every platform: it needs nothing at build time and picks a backend at run time.
+# Per platform:
+#   linux/android  no sysroot has ALSA, bionic has none. Ports and MIDI go too:
+#                  the ALSA sources implementing them include <alsa/asoundlib.h>.
+#   bsd            OpenJDK has no BSD sound sources at all, but still builds
+#                  libjsound with USE_DAUDIO=TRUE, so DAUDIO_* goes undefined.
+#                  No native ports/MIDI to keep either.
+#   windows/macosx nothing missing; one PCM implementation instead of five. Only
+#                  the platform PCM file is dropped, so native ports and MIDI stay.
+# 8 is linux-only: its makefile lists sources per OS and its windows port does not
+# build yet.
+#
+# Copy the pinned header and the backend into the platform sound source directory;
+# 8 and 11+ disagree on where that is, so the caller passes it in.
+install_miniaudio() {
+  local dest="$1" header="$BUILD_DIR/miniaudio-$MINIAUDIO_VERSION/miniaudio.h"
+
+  [ -d "$dest" ] || { echo "libjsound sources not found at $dest" >&2; exit 1; }
+  [ -f "$MINIAUDIO_BACKEND" ] || {
+    echo "miniaudio backend not found at $MINIAUDIO_BACKEND" >&2; exit 1; }
+  if [ ! -f "$header" ]; then
+    log "Downloading miniaudio $MINIAUDIO_VERSION (libjsound PCM backend)"
+    mkdir -p "$(dirname "$header")"
+    fetch --dir="$(dirname "$header")" -o miniaudio.h \
+      "https://raw.githubusercontent.com/mackron/miniaudio/$MINIAUDIO_VERSION/miniaudio.h"
+  fi
+  cp "$header" "$dest/miniaudio.h"
+  cp "$MINIAUDIO_BACKEND" "$dest/"
+}
+
+# The libjsound makefile on 11+: 11 in make/lib/, 17+ in make/modules/.
+jsound_makefile() {
+  local gmk="$SRC/make/modules/java.desktop/Lib.gmk"
+  [ -f "$gmk" ] || gmk="$SRC/make/lib/Lib-java.desktop.gmk"
+  [ -f "$gmk" ] || { echo "libjsound makefile not found under $SRC/make" >&2; exit 1; }
+  printf '%s\n' "$gmk"
+}
+
+# Drop platform sources from libjsound (11+). No release has an EXCLUDE_FILES
+# there, so this is always an insertion; values are basenames, which is what
+# EXCLUDE_FILES matches on.
+jsound_exclude() {
+  local gmk="$1" files="$2"
+  awk -v excl="$files" '
+    { print }
+    !done && index($0, "NAME := jsound, \\") {
+      match($0, /^[[:space:]]*/)
+      print substr($0, 1, RLENGTH) "EXCLUDE_FILES := " excl ", \\"
+      done = 1
+    }
+    END { if (!done) exit 1 }
+  ' "$gmk" > "$gmk.tmp" || {
+    echo "unexpected $gmk: no libjsound NAME to anchor to" >&2; exit 1; }
+  mv "$gmk.tmp" "$gmk"
+  grep -q "EXCLUDE_FILES := $files" "$gmk" || {
+    echo "failed to exclude $files from libjsound in $gmk" >&2; exit 1; }
+}
+
+if [ "$TARGET_OS" = linux ]; then
+  if [ "$JDK_VERSION" = 8 ]; then
+    log "Building libjsound against miniaudio instead of libjsoundalsa"
+    # 8: ALSA lives in its own libjsoundalsa, pulled in only when the makefile
+    # adds jsoundalsa to EXTRA_SOUND_JNI_LIBS. Rather than keep a second library
+    # alive, fold the miniaudio provider straight into libjsound the way macosx
+    # and solaris already fold in their own platform PCM files, libjsound's
+    # mapfile already exports the DirectAudioDevice natives for exactly that
+    # reason, so no symbol plumbing has to move. 8 is also the one version
+    # shipping a checked-in generated-configure.sh, so ALSA_NOT_NEEDED goes into
+    # it as well as the .m4.
+    SND_GMK="$SRC/jdk/make/lib/SoundLibraries.gmk"
+    grep -q 'EXTRA_SOUND_JNI_LIBS += jsoundalsa' "$SND_GMK" 2>/dev/null || {
+      echo "unexpected $SND_GMK: no jsoundalsa to replace" >&2; exit 1; }
+    for f in "$SRC/common/autoconf/libraries.m4" "$SRC/common/autoconf/generated-configure.sh"; do
+      [ -f "$f" ] || continue
+      # The linux block only disables pulse; disable alsa right alongside it. The
+      # other OS blocks that set PULSE_NOT_NEEDED already disable alsa too, so
+      # matching all of them is harmless.
+      sed -i 's/^\([[:space:]]*\)PULSE_NOT_NEEDED=yes$/\1PULSE_NOT_NEEDED=yes\n\1ALSA_NOT_NEEDED=yes/' "$f"
+    done
+
+    # 8 keeps every unix platform source under src/solaris, ALSA included.
+    install_miniaudio "$SRC/jdk/src/solaris/native/com/sun/media/sound"
+
+    # Then rewrite the linux block: no jsoundalsa (its whole makefile stanza is
+    # guarded on EXTRA_SOUND_JNI_LIBS, so dropping the entry leaves the ALSA
+    # sources uncompiled), and the DirectAudio provider compiled into libjsound
+    # with the providers miniaudio cannot serve switched off. LIBJSOUND_SRC_FILES
+    # is an explicit list here, so nothing has to be excluded.
+    sed -i '/EXTRA_SOUND_JNI_LIBS += jsoundalsa/d' "$SND_GMK"
+    awk '
+      $0 == "  LIBJSOUND_CFLAGS += -DX_PLATFORM=X_LINUX" {
+        print "  LIBJSOUND_CFLAGS += -DX_PLATFORM=X_LINUX \\"
+        print "      -DUSE_DAUDIO=TRUE \\"
+        print "      -DUSE_PORTS=FALSE \\"
+        print "      -DUSE_PLATFORM_MIDI_OUT=FALSE \\"
+        print "      -DUSE_PLATFORM_MIDI_IN=FALSE"
+        print "  LIBJSOUND_SRC_FILES += PLATFORM_API_MiniAudio_PCM.c $(LIBJSOUND_DAUDIOFILES)"
+        done = 1
+        next
+      }
+      { print }
+      END { if (!done) exit 1 }
+    ' "$SND_GMK" > "$SND_GMK.tmp" || {
+      echo "unexpected $SND_GMK: no linux X_PLATFORM line to extend" >&2; exit 1; }
+    mv "$SND_GMK.tmp" "$SND_GMK"
+
+    # miniaudio resolves its backends through the dynamic loader at run time.
+    awk '
+      !done && index($0, "LDFLAGS_SUFFIX_posix := -ljava -ljvm,") {
+        match($0, /^[[:space:]]*/)
+        print substr($0, 1, RLENGTH) "LDFLAGS_SUFFIX_linux := $(LIBDL) -lm -lpthread, \\"
+        done = 1
+      }
+      { print }
+      END { if (!done) exit 1 }
+    ' "$SND_GMK" > "$SND_GMK.tmp" || {
+      echo "unexpected $SND_GMK: no libjsound LDFLAGS_SUFFIX to extend" >&2; exit 1; }
+    mv "$SND_GMK.tmp" "$SND_GMK"
+  else
+    log "Building libjsound against miniaudio instead of ALSA"
+    # 11+: configure regenerates from the .m4 via autoconf (no checked-in
+    # generated-configure.sh since 11), so clearing NEEDS_LIB_ALSA is all it
+    # takes to stop it hunting for headers no sysroot here has.
+    ALSA_M4="$SRC/make/autoconf/libraries.m4"
+    grep -qE 'NEEDS_LIB_ALSA=(true|false)' "$ALSA_M4" || {
+      echo "unexpected $ALSA_M4: no NEEDS_LIB_ALSA to disable" >&2; exit 1; }
+    sed -i 's/NEEDS_LIB_ALSA=true/NEEDS_LIB_ALSA=false/' "$ALSA_M4"
+
+    # 11+ keeps the linux platform sources next to the ALSA ones they replace.
+    JSOUND_SRC="$SRC/src/java.desktop/linux/native/libjsound"
+    install_miniaudio "$JSOUND_SRC"
+
+    # Then point the makefile at it. The ALSA sources include <alsa/asoundlib.h>
+    # and call snd_* outside the USE_* guards, so they have to leave the build
+    # entirely; the providers miniaudio cannot serve are compiled out through the
+    # USE_* flags the sources already honour; and -lasound gives way to the
+    # dynamic loader miniaudio needs ($(ALSA_LIBS) is empty by now anyway).
+    JSOUND_GMK="$(jsound_makefile)"
+    if ! grep -q 'EXCLUDE_FILES := PLATFORM_API_LinuxOS_ALSA' "$JSOUND_GMK"; then
+      grep -q 'LIBS_linux := $(ALSA_LIBS)' "$JSOUND_GMK" || {
+        echo "unexpected $JSOUND_GMK: no ALSA_LIBS to replace" >&2; exit 1; }
+      sed -i \
+        -e 's/-DUSE_PORTS=TRUE/-DUSE_PORTS=FALSE/' \
+        -e 's/-DUSE_PLATFORM_MIDI_OUT=TRUE/-DUSE_PLATFORM_MIDI_OUT=FALSE/' \
+        -e 's/-DUSE_PLATFORM_MIDI_IN=TRUE/-DUSE_PLATFORM_MIDI_IN=FALSE/' \
+        -e 's|LIBS_linux := [$](ALSA_LIBS),|LIBS_linux := $(LIBDL) -lm -lpthread,|' \
+        "$JSOUND_GMK"
+      # EXCLUDE_FILES matches on basename, so the list needs no paths.
+      ALSA_SRC="$(cd "$JSOUND_SRC" && echo PLATFORM_API_LinuxOS_ALSA_*.c)"
+      case "$ALSA_SRC" in
+        *'*'*) echo "unexpected $JSOUND_SRC: no ALSA sources to exclude" >&2; exit 1 ;;
+      esac
+      jsound_exclude "$JSOUND_GMK" "$ALSA_SRC"
+    fi
+  fi
+elif [ "$JDK_VERSION" != 8 ]; then
+  case "$TARGET_OS" in
+    bsd)
+      log "Building libjsound against miniaudio (the BSDs ship no sound sources)"
+      # Nothing to replace, only a hole to fill. FindSrcDirsForLib wildcards
+      # src/<module>/$(OPENJDK_TARGET_OS)/native/lib<name>, so creating the
+      # directory is enough to get both files compiled in.
+      JSOUND_SRC="$SRC/src/java.desktop/bsd/native/libjsound"
+      mkdir -p "$JSOUND_SRC"
+      install_miniaudio "$JSOUND_SRC"
+
+      JSOUND_GMK="$(jsound_makefile)"
+      if ! grep -q 'LIBS_bsd :=' "$JSOUND_GMK"; then
+        # No BSD ports/MIDI to keep; leaving them on leaves PORT_*/MIDI_* undefined.
+        sed -i \
+          -e 's/-DUSE_PORTS=TRUE/-DUSE_PORTS=FALSE/' \
+          -e 's/-DUSE_PLATFORM_MIDI_OUT=TRUE/-DUSE_PLATFORM_MIDI_OUT=FALSE/' \
+          -e 's/-DUSE_PLATFORM_MIDI_IN=TRUE/-DUSE_PLATFORM_MIDI_IN=FALSE/' \
+          "$JSOUND_GMK"
+        # miniaudio needs libm and threads; dlopen is in libc on the BSDs, so
+        # there is no -ldl to add. awk, not sed: this sed writes a literal \n
+        # rather than a line break, silently merging LIBS_bsd into the next line.
+        awk '
+          !done && index($0, "LIBS_linux := $(ALSA_LIBS),") {
+            match($0, /^[[:space:]]*/)
+            print substr($0, 1, RLENGTH) "LIBS_bsd := -lm -lpthread, \\"
+            done = 1
+          }
+          { print }
+          END { if (!done) exit 1 }
+        ' "$JSOUND_GMK" > "$JSOUND_GMK.tmp" || {
+          echo "unexpected $JSOUND_GMK: no LIBS_linux to anchor LIBS_bsd to" >&2; exit 1; }
+        mv "$JSOUND_GMK.tmp" "$JSOUND_GMK"
+        # -F with the trailing backslash: the continuation is what matters, and
+        # this grep will not match a "\\$" in a basic regexp.
+        grep -qF 'LIBS_bsd := -lm -lpthread, \' "$JSOUND_GMK" || {
+          echo "failed to add LIBS_bsd to libjsound in $JSOUND_GMK" >&2; exit 1; }
+      fi
+      ;;
+    macosx|windows)
+      # Only the PCM file goes; the rest of the directory stays, so CoreMIDI /
+      # WinMM MIDI and the mixer ports are untouched. Both keep their non-DAUDIO
+      # helpers to themselves, checked against every other source there.
+      if [ "$TARGET_OS" = macosx ]; then
+        JSOUND_SRC="$SRC/src/java.desktop/macosx/native/libjsound"
+        JSOUND_PCM=PLATFORM_API_MacOSX_PCM.cpp
+        log "Building libjsound's PCM provider on miniaudio, keeping CoreMIDI and the ports"
+      else
+        JSOUND_SRC="$SRC/src/java.desktop/windows/native/libjsound"
+        JSOUND_PCM=PLATFORM_API_WinOS_DirectSound.cpp
+        log "Building libjsound's PCM provider on miniaudio, keeping WinMM MIDI and the ports"
+      fi
+      install_miniaudio "$JSOUND_SRC"
+      [ -f "$JSOUND_SRC/$JSOUND_PCM" ] || {
+        echo "unexpected $JSOUND_SRC: no $JSOUND_PCM to replace" >&2; exit 1; }
+
+      JSOUND_GMK="$(jsound_makefile)"
+      # The library list already carries what miniaudio resolves against
+      # (CoreAudio/AudioToolbox on macOS, ole32 for WASAPI on windows), so only
+      # the source swap is needed. USE_PORTS and USE_PLATFORM_MIDI_* stay TRUE
+      # here, unlike every other platform.
+      grep -q "EXCLUDE_FILES := $JSOUND_PCM" "$JSOUND_GMK" ||
+        jsound_exclude "$JSOUND_GMK" "$JSOUND_PCM"
+      ;;
+  esac
+fi
 
 # No state file is written: build.sh / make-jdk.sh recompute the same SRC and
 # BOOT_JDK paths from $ROOTDIR, and take JDK_VERSION straight from the env (the
