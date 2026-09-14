@@ -160,6 +160,23 @@ bool os::win32::get_frame_at_stack_banging_point(JavaThread* thread,
   return true;
 }
 
+// VM_Version probes for VFP, NEON and the multiprocessing extensions by
+// running the instruction and catching the fault, and records each probe's
+// address here so the signal handler can recognise it. os_cpu/linux_arm
+// defines these and skips the faulting instruction from its SIGILL handler.
+// Windows on 32-bit ARM has required VFPv3 and NEON since Windows RT, so no
+// probe here can fault, and the definitions exist for the assignments in
+// vm_version_arm_32.cpp to land somewhere.
+extern "C" address check_vfp_fault_instr;
+extern "C" address check_vfp3_32_fault_instr;
+extern "C" address check_simd_fault_instr;
+extern "C" address check_mp_ext_fault_instr;
+
+address check_vfp_fault_instr = nullptr;
+address check_vfp3_32_fault_instr = nullptr;
+address check_simd_fault_instr = nullptr;
+address check_mp_ext_fault_instr = nullptr;
+
 frame os::get_sender_for_C_frame(frame* fr) {
   ShouldNotReachHere();
   return frame();
