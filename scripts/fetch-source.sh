@@ -56,6 +56,14 @@ case "${PLATFORM:-}" in
   macos)         TARGET_OS=macosx ;;
   *)             TARGET_OS="" ;;
 esac
+
+# The triple configure is actually given. build.sh normalises arm64ec to aarch64
+# because autoconf has never heard of it, and anything here that asks whether
+# the tree can parse a triple has to ask about the same one.
+CONF_TRIPLE="${TARGET:-}"
+case "${TARGET:-}" in
+  arm64ec-*) CONF_TRIPLE="aarch64-${TARGET#*-}" ;;
+esac
 # The same file 21 and 25 ship, pinned to a tag; see the config.sub block below.
 CONFIG_SUB_URL="${CONFIG_SUB_URL:-https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12%2B8/make/autoconf/build-aux/autoconf-config.sub}"
 MINIAUDIO_VERSION="${MINIAUDIO_VERSION:-0.11.25}"
@@ -2716,8 +2724,8 @@ fi
 # cannot parse this target, so a release that refreshes it is left alone.
 CONFIG_SUB_DIR="$SRC/make/autoconf/build-aux"
 [ -d "$CONFIG_SUB_DIR" ] || CONFIG_SUB_DIR="$SRC/common/autoconf/build-aux"
-if [ -n "${TARGET:-}" ] && [ -f "$CONFIG_SUB_DIR/config.sub" ] \
-   && ! bash "$CONFIG_SUB_DIR/config.sub" "$TARGET" >/dev/null 2>&1; then
+if [ -n "$CONF_TRIPLE" ] && [ -f "$CONFIG_SUB_DIR/config.sub" ] \
+   && ! bash "$CONFIG_SUB_DIR/config.sub" "$CONF_TRIPLE" >/dev/null 2>&1; then
   log "Refreshing config.sub (the bundled one predates android)"
   CONFIG_SUB_CACHE="$BUILD_DIR/autoconf-config.sub"
   if [ ! -f "$CONFIG_SUB_CACHE" ]; then
@@ -2725,8 +2733,8 @@ if [ -n "${TARGET:-}" ] && [ -f "$CONFIG_SUB_DIR/config.sub" ] \
     fetch --dir="$BUILD_DIR" -o autoconf-config.sub "$CONFIG_SUB_URL"
   fi
   cp "$CONFIG_SUB_CACHE" "$CONFIG_SUB_DIR/autoconf-config.sub"
-  bash "$CONFIG_SUB_DIR/config.sub" "$TARGET" >/dev/null 2>&1 || {
-    echo "refreshed config.sub still cannot parse '$TARGET'" >&2; exit 1; }
+  bash "$CONFIG_SUB_DIR/config.sub" "$CONF_TRIPLE" >/dev/null 2>&1 || {
+    echo "refreshed config.sub still cannot parse '$CONF_TRIPLE'" >&2; exit 1; }
 fi
 
 # --- jdk8: give the clang toolchain a PIC flag ------------------------------

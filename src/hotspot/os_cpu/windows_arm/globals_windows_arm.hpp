@@ -33,6 +33,10 @@
 // Windows sizes the stack from the executable's header, so leave the defaults
 // at 0 and let the system pick, as the other windows ports do. The flag types
 // follow os_cpu/linux_arm, which is the 32-bit ARM reference in this release.
+// 21 and earlier require this one; 25 dropped it. Defining it where nothing
+// reads it costs an unused constant, which is cheaper than a per-release file.
+define_pd_global(bool, DontYieldALot,            false);
+
 define_pd_global(intx, ThreadStackSize,          0); // 0 => use system default
 define_pd_global(intx, VMThreadStackSize,        0);
 
