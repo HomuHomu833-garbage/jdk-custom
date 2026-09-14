@@ -361,26 +361,21 @@ EOF
       # and there are too many across the tree to hand-edit. Demote them to
       # warnings rather than silencing them, so they stay visible in the log.
       WIN_LAX="-Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
-      # harfbuzz promotes 35 of its own warnings to errors from inside hb.hh,
-      # with "#pragma GCC diagnostic error", so no -Wno- on the command line can
-      # win. Upstream silences that with -DHB_NO_PRAGMA_GCC_DIAGNOSTIC, but only
-      # for non-windows targets, windows having always meant a cl.exe that
-      # ignores GCC pragmas:
-      #   hb-meta.hh:131: error: unused function template [-Werror,-Wunused-template]
-      # The macro is harfbuzz's own, so defining it for the whole windows build
-      # is harmless, and it heads off the other 34 pragmas as well.
+      # hb.hh promotes 35 of its own warnings to errors with "#pragma GCC
+      # diagnostic error", which no -Wno- on the command line can outrank:
+      #   hb-meta.hh:131: error: unused function template [-Wunused-template]
+      # Upstream's own off switch, set for every target but windows, since
+      # windows meant a cl.exe that ignores GCC pragmas.
       WIN_HB="-DHB_NO_PRAGMA_GCC_DIAGNOSTIC"
       WIN_CFLAGS="-I$CASE_INC $WIN_DEFS -fms-extensions -Wno-nonportable-include-path $WIN_LAX $WIN_HB"
 
-      # C++ sources only, and 11 only. 11 asks for -std=gnu++98 but keeps it
-      # only if FLAGS_CXX_COMPILER_CHECK_ARGUMENTS can compile with it plus
-      # -Werror, and that check does not survive clang 22, so the JDK libraries
-      # end up with no language level at all and take clang's default of C++17.
-      # throw() was removed in C++17:
+      # 11 keeps -std=gnu++98 only if it compiles with -Werror, which fails on
+      # clang 22, leaving the JDK libraries at clang's default of C++17, where
+      # the throw() in AWT's headers is gone:
       #   alloc.h:89: error: ISO C++17 does not allow dynamic exception
-      #   specifications [-Wdynamic-exception-spec]
-      # Ask for the level 17 and later set for everything (LANGSTD_CXXFLAGS),
-      # which is new enough for the sources and still allows throw().
+      #   specifications
+      # Take the level 17 and later set for everything. cxxflags only: in
+      # cflags it would fail every C compile.
       WIN_CXXSTD=""
       if [ "$JDK_VERSION" = 11 ]; then
         WIN_CXXSTD="-std=c++14"
@@ -857,8 +852,7 @@ EOF
     fi
 
     # The SSPI package names AcquireCredentialsHandleW wants as LPWSTR are cast
-    # by the JDK-8281525 backport in patches/global/jdk/11, which covers all
-    # three call sites rather than the one that happened to fail.
+    # by the JDK-8281525 backport in patches/global/jdk/11.
 
     # jaccessinspectorWindow.rc names its menu cjaccessinspectorMenus, which no
     # header defines, the resource header still calls it cFerretMenus, from
@@ -1111,14 +1105,12 @@ EOF
       log "Leaving ARFLAGS empty for the mingw archiver"
     fi
 
-    # Same file, 11 only: the version-info defines for the resource compiler sit
-    # inside the microsoft branch, so a clang build gets an empty RC_FLAGS and
-    # the .rc keeps a bare token where a number belongs:
-    #   llvm-rc: Error parsing file: expected '-', '~', integer or '(', got JDK_VER
-    # 17 and later moved those defines into JdkNativeCompilation.gmk, outside any
-    # toolchain test, which is why only 11 breaks. Do the same here by keying the
-    # block on the target OS and leaving only the two cl.exe switches behind,
-    # which windres does not accept.
+    # Same file, 11 only: its version-info defines for the resource compiler sit
+    # in the microsoft branch, so a clang build gets an empty RC_FLAGS and the
+    # .rc keeps a bare token where a number belongs:
+    #   llvm-rc: expected '-', '~', integer or '(', got JDK_VER
+    # 17 moved them out of any toolchain test. Key the block on the target OS,
+    # leaving behind only the two cl.exe switches windres rejects.
     if [ -f "$ARF" ] && grep -q '^    RC_FLAGS="-nologo -l0x409"$' "$ARF"; then
       awk '
         $0 == "  # On Windows, we need to set RC flags." { print; inrc = 1; next }
@@ -1142,19 +1134,15 @@ EOF
       log "Defining the version-info macros for the mingw resource compiler"
     fi
 
-    # 11's windows JNI types are handled by the JDK-8308780 backport in
-    # patches/global/jdk/11, which has to move nine companion files with jni_md.h
-    # and is too wide for a sed here.
+    # 11's windows JNI types come from the JDK-8308780 backport in
+    # patches/global/jdk/11; nine companion files move with jni_md.h.
     #
-    # count_trailing_zeros picks its implementation by toolchain, and the gcc
-    # branch assumes unsigned long is as wide as uintx, true on LP64 and false on
-    # win64, where it is half the width:
-    #   count_trailing_zeros.hpp:44: error: implicit instantiation of undefined
-    #   template 'STATIC_ASSERT_FAILURE<false>'
-    # __builtin_ctzl would also truncate. 17 restructured the whole header into
-    # width-explicit _32 and _64 helpers, which drags its callers along, so keep
-    # 11's shape and take the long long builtin on mingw. Zero-extending a
-    # narrower x cannot change a trailing-zero count for x != 0.
+    # count_trailing_zeros dispatches on toolchain, and its gcc branch assumes
+    # unsigned long is as wide as uintx. False on win64, where it is half:
+    #   count_trailing_zeros.hpp:44: STATIC_ASSERT_FAILURE<false>
+    # __builtin_ctzl would truncate too. 17 rewrote the header into width
+    # explicit helpers, dragging its callers along, so keep 11's shape and take
+    # the long long builtin. Zero-extending cannot change the count for x != 0.
     CTZ="$SRC/src/hotspot/share/utilities/count_trailing_zeros.hpp"
     if [ -f "$CTZ" ] && grep -q '^  STATIC_ASSERT(sizeof(unsigned long) == sizeof(uintx));$' "$CTZ"; then
       perl -0pi -e 's/^  STATIC_ASSERT\(sizeof\(unsigned long\) == sizeof\(uintx\)\);\n(  assert\(x != 0, "precondition"\);\n)  return __builtin_ctzl\(x\);$/#ifdef __MINGW32__\n  STATIC_ASSERT(sizeof(unsigned long long) >= sizeof(uintx));\n$1  return __builtin_ctzll(x);\n#else\n  STATIC_ASSERT(sizeof(unsigned long) == sizeof(uintx));\n$1  return __builtin_ctzl(x);\n#endif/m' "$CTZ"
@@ -1980,15 +1968,14 @@ PLEOF
 esac
 
 # --- newer-clang fallout ----------------------------------------------------
-# llvm-mingw 20260826 carries clang 22, well ahead of the NDK and zig clangs the
-# other platforms use. Both fixes below are toolchain-driven, not platform-driven,
-# so they apply everywhere rather than in the windows branch.
+# llvm-mingw carries clang 22, well ahead of the NDK and zig clangs. Both fixes
+# are toolchain-driven rather than platform-driven, so they sit outside the
+# windows branch.
 #
-# harfbuzz trips -Wunused-template in its own headers several hundred times, and
-# the JDK promotes it to an error. Upstream already has the right place to say so,
-# a per-library list that simply predates the warning. 11 keeps it in
-# make/lib/Awt2dLibraries.gmk, 17 and 21 in make/modules/java.desktop/lib/, 25 in
-# ClientLibraries.gmk, so find it rather than naming the file.
+# harfbuzz trips -Wunused-template in its own headers hundreds of times, and the
+# JDK promotes it. Upstream's per-library list is the right place to say
+# otherwise; it just predates the warning. The list moved between releases, so
+# find it rather than name the file.
 hb_warn=0
 while IFS= read -r f; do
   grep -q 'HARFBUZZ_DISABLED_WARNINGS_clang := ' "$f" || continue
@@ -2002,12 +1989,11 @@ if [ "$hb_warn" = 1 ]; then
   log "Disabling -Wunused-template for harfbuzz"
 fi
 
-# Two jpackage headers lean on includes they used to get transitively. The
-# second one cascades: with std::streamsize unknown the istream overload of
-# ResourceEditor::apply never declares, so calls to it resolve to the tstring
-# overload instead and fail as "no viable conversion from std::istringstream".
-#   SysInfo.h:83: error: no type named 'nothrow_t' in namespace 'std'
-#   ResourceEditor.h:105: error: no type named 'streamsize' in namespace 'std'
+# Two jpackage headers lean on includes they used to get transitively:
+#   SysInfo.h:83: no type named 'nothrow_t' in namespace 'std'
+#   ResourceEditor.h:105: no type named 'streamsize' in namespace 'std'
+# The second cascades: with streamsize unknown the istream overload of
+# ResourceEditor::apply never declares, so callers resolve to the tstring one.
 RESED="$SRC/src/jdk.jpackage/windows/native/libjpackage/ResourceEditor.h"
 if [ -f "$RESED" ] && grep -q 'std::streamsize' "$RESED" && ! grep -q '^#include <istream>$' "$RESED"; then
   perl -0pi -e 's/^#include <vector>$/#include <istream>\n#include <vector>/m' "$RESED"
@@ -2526,15 +2512,13 @@ if [ "$TARGET_OS" = windows ] && [ "${TARGET%%-*}" = i686 ] &&
   common_conf+=(--enable-deprecated-ports=yes)
 fi
 
-# 11 only: hotspot's gtest unit tests are built as part of make images, and one
-# of them puts a vector of an anonymous-namespace type through libc++, where the
-# unqualified swap() in __split_buffer finds both std::swap and the global swap
-# in hotspot's globalDefinitions.hpp:
+# 11 only: make images builds hotspot's gtest tests, and one puts a vector of an
+# anonymous-namespace type through libc++, where the unqualified swap() in
+# __split_buffer finds both std::swap and hotspot's global swap:
 #   __split_buffer:195: error: call to 'swap' is ambiguous
-# Nothing here builds or runs those tests, and they are not in the image, so turn
-# them off rather than reconcile the two. Every release still carries that global
-# swap; 17 and later renamed this option and build without tripping the clash, so
-# it stays keyed to 11, where configure would otherwise reject it as unknown.
+# Nothing here runs those tests and they are not in the image, so switch them off
+# rather than reconcile a libc++ internal with a hotspot header. 17 and later
+# renamed the option, where passing it would be fatal as unknown.
 if [ "$JDK_VERSION" = 11 ]; then
   common_conf+=(--disable-hotspot-gtest)
 fi
