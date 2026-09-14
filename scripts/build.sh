@@ -731,6 +731,20 @@ EOF
       fi
     fi
 
+    # The sweep above takes whole tokens, so it cannot reach a link.exe flag
+    # that carries a value:
+    #   clang: error: unknown argument: '-map:.../jdk.pack/unpack.map'
+    # That map is a link.exe listing nothing in the build reads back. Only
+    # jdk.pack asks for one, and 14 deleted jdk.pack, so this is 11 and 8.
+    if [ -d "$SRC/make" ]; then
+      map_files=$(grep -rlE '[-/]map:' --include='*.gmk' "$SRC/make" 2>/dev/null || true)
+      if [ -n "$map_files" ]; then
+        printf '%s\n' "$map_files" | xargs sed -E -i \
+          "s/(^|[[:space:]])[-\\/]map:[^ ,]*/\\1/g"
+        log "Dropped the link.exe map flag from $(printf '%s\n' "$map_files" | wc -l) makefiles"
+      fi
+    fi
+
     # The .rc itself compiles, but RC cannot report its own includes, so the
     # build re-runs the resource through the C compiler to harvest a dependency
     # list, in MSVC's dialect and without asking the toolchain:
