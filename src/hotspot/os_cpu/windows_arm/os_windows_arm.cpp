@@ -118,10 +118,6 @@ intptr_t* os::fetch_bcp_from_context(const void* ucVoid) {
   return reinterpret_cast<intptr_t*>(uc->REG_BCP);
 }
 
-void os::win32::context_set_pc(CONTEXT* uc, address pc) {
-  uc->Pc = (DWORD)(intptr_t)pc;
-}
-
 bool os::win32::get_frame_at_stack_banging_point(JavaThread* thread,
         struct _EXCEPTION_POINTERS* exceptionInfo, address pc, frame* fr) {
   PEXCEPTION_RECORD exceptionRecord = exceptionInfo->ExceptionRecord;
@@ -248,6 +244,11 @@ void os::verify_stack_alignment() {
   assert(((intptr_t)os::current_stack_pointer() & (StackAlignmentInBytes-1)) == 0, "incorrect stack alignment");
 }
 #endif
+
+int os::extra_bang_size_in_bytes() {
+  // ARM does not require an additional stack bang.
+  return 0;
+}
 
 extern "C" {
   int SpinPause() {

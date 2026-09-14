@@ -273,6 +273,27 @@ sub("  address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
     "#else\n  #error unknown architecture\n#endif\n",
     "top level filter pc", want=2)
 
+# Assembler::locate_next_instruction exists on aarch64 and x86 but not on
+# 32-bit ARM, where every instruction is the same width. os_cpu/linux_arm
+# computes the same thing as pc + Assembler::InstructionSize.
+sub("        address next_pc =  Assembler::locate_next_instruction(pc);",
+    "#ifdef _M_ARM\n"
+    "        address next_pc = pc + Assembler::InstructionSize;\n"
+    "#else\n"
+    "        address next_pc =  Assembler::locate_next_instruction(pc);\n"
+    "#endif",
+    "locate_next_instruction")
+
+# The thread-sampling context flags are defined for AMD64 and ARM64 only, and
+# the function using them is compiled for every windows target.
+sub("#if defined(AMD64) || defined(_M_ARM64)\n"
+    "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n"
+    "#endif\n",
+    "#if defined(AMD64) || defined(_M_ARM64) || defined(_M_ARM)\n"
+    "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n"
+    "#endif\n",
+    "sampling_context_flags")
+
 # The unhandled filter falls back to Eip, which only an x86-32 CONTEXT has.
 sub("    address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
     "#else\n    address pc = (address) exceptionInfo->ContextRecord->Eip;\n#endif\n",
