@@ -1057,16 +1057,21 @@ EOF
       log "Using the one-argument mkdir in jdk.pack"
     fi
 
-    # Lib-jdk.accessibility.gmk asks for AccessBridgeStatusWindow.rc while the
-    # file on disk is spelled .RC, which only works on a case-insensitive
-    # filesystem:
+    # AccessBridgeStatusWindow is spelled .RC on disk, .rc by the three library
+    # makefiles and .RC again by the launcher one, which only resolves on a
+    # case-insensitive filesystem:
     #   No rule to make target '.../common/AccessBridgeStatusWindow.rc'
-    # It is the only uppercase .RC in the tree, so rename the file rather than
-    # patch the three makefile references.
+    # Renaming the file alone just moves the failure to the launcher, so settle
+    # every reference on the lowercase name the other two .rc files already use.
     ABRC="$SRC/src/jdk.accessibility/windows/native/common/AccessBridgeStatusWindow"
     if [ -f "$ABRC.RC" ] && [ ! -f "$ABRC.rc" ]; then
       mv "$ABRC.RC" "$ABRC.rc"
-      log "Renamed AccessBridgeStatusWindow.RC to the spelling its makefile uses"
+      grep -rl 'AccessBridgeStatusWindow\.RC' --include='*.gmk' "$SRC/make" 2>/dev/null \
+        | xargs -r sed -i 's/AccessBridgeStatusWindow\.RC/AccessBridgeStatusWindow.rc/g'
+      if grep -rq 'AccessBridgeStatusWindow\.RC' --include='*.gmk' "$SRC/make" 2>/dev/null; then
+        echo "failed to settle AccessBridgeStatusWindow on one spelling" >&2; exit 1
+      fi
+      log "Renamed AccessBridgeStatusWindow.RC and its makefile references"
     fi
 
     # mlib_sys.c picks its aligned allocator with #if defined(_MSC_VER), and
