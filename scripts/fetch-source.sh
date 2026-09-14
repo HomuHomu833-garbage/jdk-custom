@@ -198,6 +198,99 @@ if [ "${PLATFORM:-}" = windows ]; then
         else
           echo "windows_arm port sources missing at $PORT_SRC" >&2; exit 1
         fi
+
+        # os_windows.cpp branches on _M_ARM64 and _M_AMD64 and stops at #error
+        # for anything else, so every arch-specific site needs a 32-bit ARM arm:
+        #   os_windows.cpp:132: error: "Unknown CPU"
+        #   os_windows.cpp:2487: error: unknown architecture
+        # Each substitution below insists on matching exactly once, so an
+        # upstream rewrite fails here rather than silently skipping a site.
+        # Only ARM32 targets run this; the others must not be able to break on it.
+        python3 - "$SRC/src/hotspot/os/windows/os_windows.cpp" <<'PYEOF'
+import io, sys
+
+path = sys.argv[1]
+s = io.open(path, encoding='utf-8', newline='').read()
+orig = s
+
+def sub(old, new, label):
+    global s
+    if s.count(old) != 1:
+        raise SystemExit("os_windows.cpp: %s matched %d times, expected 1" % (label, s.count(old)))
+    s = s.replace(old, new, 1)
+
+# The arch name in the fatal error header.
+sub("  #define __CPU__ amd64\n#else\n",
+    "  #define __CPU__ amd64\n#elif defined(_M_ARM)\n  #define __CPU__ arm\n#else\n",
+    "__CPU__")
+
+# dll_load's architecture check. ARMNT is the machine code windows gives a
+# 32-bit ARM image; there is no separate one for the ARM/Thumb split.
+sub('    {IMAGE_FILE_MACHINE_ARM64,     (char*)"ARM 64"}\n  };',
+    '    {IMAGE_FILE_MACHINE_ARM64,     (char*)"ARM 64"},\n'
+    '    {IMAGE_FILE_MACHINE_ARMNT,     (char*)"ARM 32"}\n  };',
+    "arch_array")
+
+sub("  static const uint16_t running_arch = IMAGE_FILE_MACHINE_AMD64;\n#else\n",
+    "  static const uint16_t running_arch = IMAGE_FILE_MACHINE_AMD64;\n"
+    "#elif (defined _M_ARM)\n"
+    "  static const uint16_t running_arch = IMAGE_FILE_MACHINE_ARMNT;\n#else\n",
+    "running_arch")
+
+# The program counter's name in CONTEXT.
+sub("  #define PC_NAME Rip\n#else\n",
+    "  #define PC_NAME Rip\n#elif defined(_M_ARM)\n  #define PC_NAME Pc\n#else\n",
+    "PC_NAME")
+
+# DWORD64 truncates where CONTEXT::Pc is 32 bits; DWORD_PTR is pointer-sized on
+# both and is what the rest of this file assigns to a context register.
+sub("  exceptionInfo->ContextRecord->PC_NAME = (DWORD64)handler;",
+    "  exceptionInfo->ContextRecord->PC_NAME = (DWORD_PTR)handler;",
+    "PC_NAME assignment")
+
+# ARM does not trap on integer division: sdiv yields min_jint for min_jint/-1
+# and a zero divisor is tested before the divide, so this cannot be reached.
+sub("  ctx->Rdx = (DWORD)0;             // remainder\n"
+    "  // Continue the execution\n"
+    "#else\n  #error unknown architecture\n#endif\n",
+    "  ctx->Rdx = (DWORD)0;             // remainder\n"
+    "  // Continue the execution\n"
+    "#elif defined(_M_ARM)\n"
+    "  // ARM does not trap on integer division: sdiv yields min_jint for\n"
+    "  // min_jint/-1, and a zero divisor is checked before the divide.\n"
+    "  ShouldNotReachHere();\n"
+    "#else\n  #error unknown architecture\n#endif\n",
+    "Handle_IDiv_Exception")
+
+# The top level filter's pc. The AMD64 arm also probes for the AVX and APX
+# save/restore faults VM_Version raises deliberately, which no ARM has.
+sub("    return Handle_Exception(exceptionInfo, VM_Version::cpuinfo_cont_addr_apx());\n"
+    "  }\n#else\n  #error unknown architecture\n#endif\n",
+    "    return Handle_Exception(exceptionInfo, VM_Version::cpuinfo_cont_addr_apx());\n"
+    "  }\n"
+    "#elif defined(_M_ARM)\n"
+    "  address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
+    "\n"
+    "  if (handle_safefetch(exception_code, pc, (void*)exceptionInfo->ContextRecord)) {\n"
+    "    return EXCEPTION_CONTINUE_EXECUTION;\n"
+    "  }\n"
+    "#else\n  #error unknown architecture\n#endif\n",
+    "topLevelExceptionFilter pc")
+
+# The unhandled filter falls back to Eip, which only an x86-32 CONTEXT has.
+sub("    address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
+    "#else\n    address pc = (address) exceptionInfo->ContextRecord->Eip;\n#endif\n",
+    "    address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
+    "#elif defined(_M_ARM)\n"
+    "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
+    "#else\n    address pc = (address) exceptionInfo->ContextRecord->Eip;\n#endif\n",
+    "unhandled filter pc")
+
+if s == orig:
+    raise SystemExit("os_windows.cpp: nothing changed")
+io.open(path, 'w', encoding='utf-8', newline='').write(s)
+PYEOF
+        log "Giving os_windows.cpp its 32-bit ARM branches"
         ;;
     esac
 
