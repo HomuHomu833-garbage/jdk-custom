@@ -1,0 +1,178 @@
+Backport JDK-8308780: Fix the Java Integer types on Windows
+
+11 spells the windows JNI types as MSVC extensions, "long" and "__int64". 17
+moved them to "int" and "long long" and every release since kept that. With jint
+as long, a jint argument on win64 is neither int32_t (int) nor intptr_t (long
+long), so it sits exactly between the two movptr overloads that exist, as
+macroAssembler_x86.hpp puts it, "so that int32_t and intptr_t are not the same
+and we have ambiguous declarations":
+
+  c1_LIRAssembler_x86.cpp:617: error: call to member function 'movptr' is ambiguous
+
+Both types keep their width on windows, so this is the same ABI, which is what
+let upstream make the change at all.
+
+The other nine files are the companions upstream changed in the same commit,
+without which the tree no longer builds once jint is int: AwtMenu::GetItem is
+declared long in the header and defined jint in the .cpp, the AWT icon and arc
+code hands long arrays to jint APIs, and c1_Canonicalizer's extra overload
+exists only to convert int to a jint that used to be long.
+
+Adapted where 11 differs from 17: ShellFolder2 still uses stack arrays rather
+than safe_Malloc, and GDIRenderer has two arc sites rather than one.
+
+Upstream: https://bugs.openjdk.org/browse/JDK-8308780
+
+diff -u --recursive orig/src/hotspot/share/c1/c1_Canonicalizer.hpp new/src/hotspot/share/c1/c1_Canonicalizer.hpp
+--- a/src/hotspot/share/c1/c1_Canonicalizer.hpp	2026-09-14 12:52:31.146682600 +0300
++++ b/src/hotspot/share/c1/c1_Canonicalizer.hpp	2026-09-14 12:53:27.805242700 +0300
+@@ -40,10 +40,6 @@
+   void set_constant(jlong x)                     { set_canonical(new Constant(new LongConstant(x))); }
+   void set_constant(jfloat x)                    { set_canonical(new Constant(new FloatConstant(x))); }
+   void set_constant(jdouble x)                   { set_canonical(new Constant(new DoubleConstant(x))); }
+-#ifdef _WINDOWS
+-  // jint is defined as long in jni_md.h, so convert from int to jint
+-  void set_constant(int x)                       { set_constant((jint)x); }
+-#endif
+   void move_const_to_right(Op2* x);
+   void do_Op2(Op2* x);
+   void do_UnsafeRawOp(UnsafeRawOp* x);
+diff -u --recursive orig/src/java.base/windows/native/include/jni_md.h new/src/java.base/windows/native/include/jni_md.h
+--- a/src/java.base/windows/native/include/jni_md.h	2026-09-14 12:52:31.583291100 +0300
++++ b/src/java.base/windows/native/include/jni_md.h	2026-09-14 12:53:27.845926700 +0300
+@@ -31,8 +31,8 @@
+ #define JNICALL __stdcall
+ 
+ // 'long' is always 32 bit on windows so this matches what jdk expects
+-typedef long jint;
+-typedef __int64 jlong;
++typedef int jint;
++typedef long long jlong;
+ typedef signed char jbyte;
+ 
+ #endif /* !_JAVASOFT_JNI_MD_H_ */
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/java2d/windows/GDIRenderer.cpp new/src/java.desktop/windows/native/libawt/java2d/windows/GDIRenderer.cpp
+--- a/src/java.desktop/windows/native/libawt/java2d/windows/GDIRenderer.cpp	2026-09-14 12:52:32.079562900 +0300
++++ b/src/java.desktop/windows/native/libawt/java2d/windows/GDIRenderer.cpp	2026-09-14 12:53:27.880494600 +0300
+@@ -49,7 +49,7 @@
+ 
+ #define POLYTEMPSIZE    (512 / sizeof(POINT))
+ 
+-static void AngleToCoord(jint angle, jint w, jint h, jint *x, jint *y)
++static void AngleToCoord(int angle, int w, int h, int *x, int *y)
+ {
+     const double pi = 3.1415926535;
+     const double toRadians = 2 * pi / 360;
+@@ -322,7 +322,7 @@
+         return;
+     }
+ 
+-    long sx, sy, ex, ey;
++    int sx, sy, ex, ey;
+     if (angleExtent >= 360 || angleExtent <= -360) {
+         sx = ex = x + w;
+         sy = ey = y + h/2;
+@@ -602,7 +602,7 @@
+     if (wsdo == NULL) {
+         return;
+     }
+-    long sx, sy, ex, ey;
++    int sx, sy, ex, ey;
+     int angleEnd;
+     if (angleExtent < 0) {
+         angleEnd = angleStart;
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/java2d/windows/GDIWindowSurfaceData.cpp new/src/java.desktop/windows/native/libawt/java2d/windows/GDIWindowSurfaceData.cpp
+--- a/src/java.desktop/windows/native/libawt/java2d/windows/GDIWindowSurfaceData.cpp	2026-09-14 12:52:32.614932000 +0300
++++ b/src/java.desktop/windows/native/libawt/java2d/windows/GDIWindowSurfaceData.cpp	2026-09-14 12:53:27.920644600 +0300
+@@ -897,7 +897,7 @@
+     }
+     if (wsdo->lockFlags & SD_LOCK_LUT) {
+         pRasInfo->lutBase =
+-            (long *) wsdo->device->GetSystemPaletteEntries();
++            (jint *) wsdo->device->GetSystemPaletteEntries();
+         pRasInfo->lutSize = 256;
+     } else {
+         pRasInfo->lutBase = NULL;
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/ShellFolder2.cpp new/src/java.desktop/windows/native/libawt/windows/ShellFolder2.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/ShellFolder2.cpp	2026-09-14 12:52:33.117575400 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/ShellFolder2.cpp	2026-09-14 12:53:27.961372100 +0300
+@@ -1030,7 +1030,7 @@
+             bmi.bmiHeader.biCompression = BI_RGB;
+             // Extract the color bitmap
+             int nBits = iconSize * iconSize;
+-            long colorBits[MAX_ICON_SIZE * MAX_ICON_SIZE];
++            jint colorBits[MAX_ICON_SIZE * MAX_ICON_SIZE];
+             GetDIBits(dc, iconInfo.hbmColor, 0, iconSize, colorBits, &bmi, DIB_RGB_COLORS);
+             // XP supports alpha in some icons, and depending on device.
+             // This should take precedence over the icon mask bits.
+@@ -1045,7 +1045,7 @@
+             }
+             if (!hasAlpha) {
+                 // Extract the mask bitmap
+-                long maskBits[MAX_ICON_SIZE * MAX_ICON_SIZE];
++                jint maskBits[MAX_ICON_SIZE * MAX_ICON_SIZE];
+                 GetDIBits(dc, iconInfo.hbmMask, 0, iconSize, maskBits, &bmi, DIB_RGB_COLORS);
+                 // Copy the mask alphas into the color bits
+                 for (int i = 0; i < nBits; i++) {
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_Menu.h new/src/java.desktop/windows/native/libawt/windows/awt_Menu.h
+--- a/src/java.desktop/windows/native/libawt/windows/awt_Menu.h	2026-09-14 12:52:33.601275000 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_Menu.h	2026-09-14 12:53:28.001717900 +0300
+@@ -74,7 +74,7 @@
+ 
+     /*for multifont menu */
+     BOOL IsTopMenu();
+-    virtual AwtMenuItem* GetItem(jobject target, long index);
++    virtual AwtMenuItem* GetItem(jobject target, jint index);
+ 
+     virtual int CountItem(jobject target);
+ 
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_MenuBar.cpp new/src/java.desktop/windows/native/libawt/windows/awt_MenuBar.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/awt_MenuBar.cpp	2026-09-14 12:52:34.113737600 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_MenuBar.cpp	2026-09-14 12:53:28.081879400 +0300
+@@ -145,7 +145,7 @@
+     return nCount;
+ }
+ 
+-AwtMenuItem* AwtMenuBar::GetItem(jobject target, long index)
++AwtMenuItem* AwtMenuBar::GetItem(jobject target, jint index)
+ {
+     JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
+     if (env->EnsureLocalCapacity(2) < 0) {
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_MenuBar.h new/src/java.desktop/windows/native/libawt/windows/awt_MenuBar.h
+--- a/src/java.desktop/windows/native/libawt/windows/awt_MenuBar.h	2026-09-14 12:52:34.644469200 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_MenuBar.h	2026-09-14 12:53:28.042310500 +0300
+@@ -66,7 +66,7 @@
+     virtual HWND GetOwnerHWnd();
+     virtual void RedrawMenuBar();
+ 
+-    AwtMenuItem* GetItem(jobject target, long index);
++    AwtMenuItem* GetItem(jobject target, jint index);
+     int CountItem(jobject menuBar);
+ 
+     void DrawItem(DRAWITEMSTRUCT& drawInfo);
+diff -u --recursive orig/src/jdk.accessibility/windows/native/jaccesswalker/jaccesswalker.cpp new/src/jdk.accessibility/windows/native/jaccesswalker/jaccesswalker.cpp
+--- a/src/jdk.accessibility/windows/native/jaccesswalker/jaccesswalker.cpp	2026-09-14 12:52:35.162479900 +0300
++++ b/src/jdk.accessibility/windows/native/jaccesswalker/jaccesswalker.cpp	2026-09-14 12:53:28.123011100 +0300
+@@ -543,7 +543,7 @@
+     } else {
+         char s[LINE_BUFSIZE];
+         sprintf( s,
+-            "ERROR calling GetAccessibleContextInfo; vmID = %X, context = %p",
++            "ERROR calling GetAccessibleContextInfo; vmID = %lX, context = %p",
+             vmID, (void*)context );
+ 
+         TVITEM tvi;
+diff -u --recursive orig/src/jdk.accessibility/windows/native/toolscommon/AccessInfo.cpp new/src/jdk.accessibility/windows/native/toolscommon/AccessInfo.cpp
+--- a/src/jdk.accessibility/windows/native/toolscommon/AccessInfo.cpp	2026-09-14 12:52:35.671034000 +0300
++++ b/src/jdk.accessibility/windows/native/toolscommon/AccessInfo.cpp	2026-09-14 12:53:28.164754600 +0300
+@@ -149,8 +149,8 @@
+     wchar_t tmpBuf[LINE_BUFSIZE];
+     wchar_t name[LINE_BUFSIZE];
+     int i, j;
+-    long start;
+-    long end;
++    jint start;
++    jint end;
+ 
+     if (buffer == NULL || bufsize <= 0) {
+         return NULL;

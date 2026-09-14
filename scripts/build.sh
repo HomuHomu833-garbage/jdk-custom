@@ -1124,27 +1124,10 @@ EOF
       log "Defining the version-info macros for the mingw resource compiler"
     fi
 
-    # 11 only, and both are the same LLP64 story as 21's NULL_WORD.
+    # 11's windows JNI types are handled by the JDK-8308780 backport in
+    # patches/global/jdk/11, which has to move nine companion files with jni_md.h
+    # and is too wide for a sed here.
     #
-    # 11 spells the windows JNI types as MSVC extensions, "long" and "__int64";
-    # 17 moved them to "int" and "long long" and every release since has kept
-    # that. It matters because jint as long is neither int32_t (int) nor
-    # intptr_t (long long) on win64, so a jint argument sits exactly between the
-    # two movptr overloads that exist, as the header puts it, "so that int32_t
-    # and intptr_t are not the same and we have ambiguous declarations":
-    #   c1_LIRAssembler_x86.cpp:617: error: call to member function 'movptr' is
-    #   ambiguous
-    # Backport 17's spelling. Both types keep their width on windows, so this is
-    # the same ABI, which is why upstream could make the change at all.
-    JNIMD="$SRC/src/java.base/windows/native/include/jni_md.h"
-    if [ -f "$JNIMD" ] && grep -q '^typedef long jint;$' "$JNIMD"; then
-      sed -i -e 's/^typedef long jint;$/typedef int jint;/' \
-             -e 's/^typedef __int64 jlong;$/typedef long long jlong;/' "$JNIMD"
-      grep -q '^typedef int jint;$' "$JNIMD" && grep -q '^typedef long long jlong;$' "$JNIMD" || {
-        echo "failed to backport 17's jni_md.h types to 11" >&2; exit 1; }
-      log "Spelling 11's windows JNI types the way 17 does (jint int, jlong long long)"
-    fi
-
     # count_trailing_zeros picks its implementation by toolchain, and the gcc
     # branch assumes unsigned long is as wide as uintx, true on LP64 and false on
     # win64, where it is half the width:
