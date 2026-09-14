@@ -1900,6 +1900,40 @@ PLEOF
   *) echo "Unknown/unsupported PLATFORM='$PLATFORM'" >&2; exit 1 ;;
 esac
 
+# --- newer-clang fallout ----------------------------------------------------
+# llvm-mingw 20260826 carries clang 22, well ahead of the NDK and zig clangs the
+# other platforms use. Both fixes below are toolchain-driven, not platform-driven,
+# so they apply everywhere rather than in the windows branch.
+#
+# harfbuzz trips -Wunused-template in its own headers several hundred times, and
+# the JDK promotes it to an error. Upstream already has the right place to say so,
+# a per-library list that simply predates the warning. 11 keeps it in
+# make/lib/Awt2dLibraries.gmk, 17 and 21 in make/modules/java.desktop/lib/, 25 in
+# ClientLibraries.gmk, so find it rather than naming the file.
+hb_warn=0
+while IFS= read -r f; do
+  grep -q 'HARFBUZZ_DISABLED_WARNINGS_clang := ' "$f" || continue
+  grep -q 'HARFBUZZ_DISABLED_WARNINGS_clang := unused-template' "$f" && continue
+  sed -i 's/^\([[:space:]]*HARFBUZZ_DISABLED_WARNINGS_clang := \)/\1unused-template /' "$f"
+  grep -q 'HARFBUZZ_DISABLED_WARNINGS_clang := unused-template ' "$f" || {
+    echo "failed to disable -Wunused-template for harfbuzz in $f" >&2; exit 1; }
+  hb_warn=1
+done < <(find "$SRC/make" -name '*.gmk')
+if [ "$hb_warn" = 1 ]; then
+  log "Disabling -Wunused-template for harfbuzz"
+fi
+
+# jpackage's SysInfo.h declares an overload taking std::nothrow_t but includes
+# only tstrings.h; it used to get <new> transitively.
+#   SysInfo.h:83: error: no type named 'nothrow_t' in namespace 'std'
+SYSI="$SRC/src/jdk.jpackage/share/native/common/SysInfo.h"
+if [ -f "$SYSI" ] && grep -q 'std::nothrow_t' "$SYSI" && ! grep -q '^#include <new>$' "$SYSI"; then
+  perl -0pi -e 's/^#include "tstrings\.h"$/#include <new>\n\n#include "tstrings.h"/m' "$SYSI"
+  grep -q '^#include <new>$' "$SYSI" || {
+    echo "failed to include <new> in jpackage's SysInfo.h" >&2; exit 1; }
+  log "Including <new> in jpackage's SysInfo.h for std::nothrow_t"
+fi
+
 # --- tell configure what the build machine is -------------------------------
 # config.guess probes the build system's libc by compiling with $CC, which is a
 # cross compiler here, so it reports the builder as whatever we target. That
