@@ -201,6 +201,29 @@ if [ "${PLATFORM:-}" = windows ]; then
         ;;
     esac
 
+    # adlc emits a check into its generated sources for every -D it was given,
+    # so they fail to compile unless the same defines are set. 25 hands it
+    # -D_WIN64=1 for any windows target, taking windows to mean 64-bit:
+    #   ad_arm.cpp:17621: error: "_WIN64 must be defined"
+    # This restores the gate 11, 17 and 21 all still have; 25 dropped it when
+    # JEP 503 made 64-bit the only windows it had left. Those releases keep
+    # theirs at a different indentation, so this matches only the ungated line.
+    ADLC_GMK="$SRC/make/hotspot/gensrc/GensrcAdlc.gmk"
+    if [ -f "$ADLC_GMK" ] && grep -qx '    ADLCFLAGS += -D_WIN64=1' "$ADLC_GMK"; then
+      awk '
+        $0 == "    ADLCFLAGS += -D_WIN64=1" {
+          print "    ifeq ($(call isTargetCpuBits, 64), true)"
+          print "      ADLCFLAGS += -D_WIN64=1"
+          print "    endif"
+          next
+        }
+        { print }
+      ' "$ADLC_GMK" > "$ADLC_GMK.tmp" && mv "$ADLC_GMK.tmp" "$ADLC_GMK"
+      grep -qx '      ADLCFLAGS += -D_WIN64=1' "$ADLC_GMK" || {
+        echo "failed to gate -D_WIN64 on the target being 64-bit" >&2; exit 1; }
+      log "Defining _WIN64 for adlc only on 64-bit windows targets"
+    fi
+
     # windef.h still defines the 16-bit memory-model keywords, so "far" expands
     # to nothing and adlc's generated ad_arm.cpp gets "bool  = ...":
     #   ad_arm.cpp:89: error: expected unqualified-id
