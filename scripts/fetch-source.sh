@@ -2372,6 +2372,23 @@ install_miniaudio() {
   fi
   cp "$header" "$dest/miniaudio.h"
   cp "$MINIAUDIO_BACKEND" "$dest/"
+
+  # ARM64EC is x64-ABI-compatible, so clang defines _M_X64 for it. miniaudio
+  # reads that as an x86 CPU and emits cpuid and xgetbv, which an ARM64 backend
+  # has no encoding for:
+  #   miniaudio.h:11758: error: invalid output constraint '=a' in asm
+  # The ARM64 test sits in the elif below it and is never reached. Both edits
+  # mention __arm64ec__, so they change nothing for any other target.
+  local ma="$dest/miniaudio.h"
+  if grep -q '^#if defined(__x86_64__) || defined(_M_X64)$' "$ma"; then
+    sed -i \
+      -e 's@^#if defined(__arm64) || defined(__arm64__) || defined(__aarch64__) || defined(_M_ARM64)$@#if defined(__arm64) || defined(__arm64__) || defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64ec__)@' \
+      -e 's@^#if defined(__x86_64__) || defined(_M_X64)$@#if (defined(__x86_64__) || defined(_M_X64)) \&\& !defined(__arm64ec__)@' \
+      "$ma"
+    grep -q '^#if (defined(__x86_64__) || defined(_M_X64)) && !defined(__arm64ec__)$' "$ma" || {
+      echo "failed to keep miniaudio's x86 intrinsics away from arm64ec" >&2; exit 1; }
+    log "Detecting arm64ec as ARM64 in miniaudio, not x64"
+  fi
 }
 
 # The libjsound makefile on 11+: 11 in make/lib/, 17+ in make/modules/.
