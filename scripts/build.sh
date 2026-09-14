@@ -361,7 +361,16 @@ EOF
       # and there are too many across the tree to hand-edit. Demote them to
       # warnings rather than silencing them, so they stay visible in the log.
       WIN_LAX="-Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
-      WIN_CFLAGS="-I$CASE_INC $WIN_DEFS -fms-extensions -Wno-nonportable-include-path $WIN_LAX"
+      # harfbuzz promotes 35 of its own warnings to errors from inside hb.hh,
+      # with "#pragma GCC diagnostic error", so no -Wno- on the command line can
+      # win. Upstream silences that with -DHB_NO_PRAGMA_GCC_DIAGNOSTIC, but only
+      # for non-windows targets, windows having always meant a cl.exe that
+      # ignores GCC pragmas:
+      #   hb-meta.hh:131: error: unused function template [-Werror,-Wunused-template]
+      # The macro is harfbuzz's own, so defining it for the whole windows build
+      # is harmless, and it heads off the other 34 pragmas as well.
+      WIN_HB="-DHB_NO_PRAGMA_GCC_DIAGNOSTIC"
+      WIN_CFLAGS="-I$CASE_INC $WIN_DEFS -fms-extensions -Wno-nonportable-include-path $WIN_LAX $WIN_HB"
       # 32-bit x86 only: hotspot reaches for SEH (__try/__except) in jni.cpp,
       # os_windows.cpp, os_windows_x86.cpp, safefetch_windows.hpp and
       # threadCrashProtection_windows.cpp. clang lowers those into MSVC-style
@@ -1923,9 +1932,20 @@ if [ "$hb_warn" = 1 ]; then
   log "Disabling -Wunused-template for harfbuzz"
 fi
 
-# jpackage's SysInfo.h declares an overload taking std::nothrow_t but includes
-# only tstrings.h; it used to get <new> transitively.
+# Two jpackage headers lean on includes they used to get transitively. The
+# second one cascades: with std::streamsize unknown the istream overload of
+# ResourceEditor::apply never declares, so calls to it resolve to the tstring
+# overload instead and fail as "no viable conversion from std::istringstream".
 #   SysInfo.h:83: error: no type named 'nothrow_t' in namespace 'std'
+#   ResourceEditor.h:105: error: no type named 'streamsize' in namespace 'std'
+RESED="$SRC/src/jdk.jpackage/windows/native/libjpackage/ResourceEditor.h"
+if [ -f "$RESED" ] && grep -q 'std::streamsize' "$RESED" && ! grep -q '^#include <istream>$' "$RESED"; then
+  perl -0pi -e 's/^#include <vector>$/#include <istream>\n#include <vector>/m' "$RESED"
+  grep -q '^#include <istream>$' "$RESED" || {
+    echo "failed to include <istream> in jpackage's ResourceEditor.h" >&2; exit 1; }
+  log "Including <istream> in jpackage's ResourceEditor.h for std::streamsize"
+fi
+
 SYSI="$SRC/src/jdk.jpackage/share/native/common/SysInfo.h"
 if [ -f "$SYSI" ] && grep -q 'std::nothrow_t' "$SYSI" && ! grep -q '^#include <new>$' "$SYSI"; then
   perl -0pi -e 's/^#include "tstrings\.h"$/#include <new>\n\n#include "tstrings.h"/m' "$SYSI"
