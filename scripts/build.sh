@@ -2508,6 +2508,19 @@ if [ "$TARGET_OS" = windows ] && [ "${TARGET%%-*}" = i686 ] &&
   common_conf+=(--enable-deprecated-ports=yes)
 fi
 
+# 11 only: hotspot's gtest unit tests are built as part of make images, and one
+# of them puts a vector of an anonymous-namespace type through libc++, where the
+# unqualified swap() in __split_buffer finds both std::swap and the global swap
+# in hotspot's globalDefinitions.hpp:
+#   __split_buffer:195: error: call to 'swap' is ambiguous
+# Nothing here builds or runs those tests, and they are not in the image, so turn
+# them off rather than reconcile the two. Every release still carries that global
+# swap; 17 and later renamed this option and build without tripping the clash, so
+# it stays keyed to 11, where configure would otherwise reject it as unknown.
+if [ "$JDK_VERSION" = 11 ]; then
+  common_conf+=(--disable-hotspot-gtest)
+fi
+
 # --with-build-user arrived in 17. configure treats unknown options as fatal
 # ("configure: error: unrecognized options: --with-build-user"), so 11 only gets
 # the environment fallback below.
