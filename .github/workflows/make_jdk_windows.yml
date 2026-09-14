@@ -19,9 +19,9 @@ jobs:
     with:
       platform: windows
       jdk_version: ${{ inputs.jdk_version }}
-      # The same five triples llvm-custom builds. x86_64 and aarch64 get the
-      # server JIT; i686, armv7 and arm64ec have no windows hotspot port, so
-      # build.sh routes them to Zero, which needs os_cpu/windows_zero.
+      # The same five triples llvm-custom builds, all on the server JIT.
+      # i686, armv7 and arm64ec each need hotspot work: a TLS get_thread for
+      # i686, os_cpu/windows_arm for armv7, ARM64EC codegen for arm64ec.
       targets: >-
         ["aarch64-w64-mingw32", "i686-w64-mingw32", "x86_64-w64-mingw32",
          "armv7-w64-mingw32", "arm64ec-w64-mingw32"]

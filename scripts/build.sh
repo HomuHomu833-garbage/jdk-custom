@@ -109,16 +109,6 @@ case "$ARCH" in
     JVM_VARIANT=zero ;;
 esac
 
-# Windows has a hotspot port for x86_64 and aarch64 only. i686's JIT reads the
-# current thread out of the SEH chain that MSVC inline asm sets up, which clang
-# cannot lower for 32-bit mingw; 32-bit ARM and ARM64EC have no os_cpu at all.
-# Zero depends on none of that, so take it and keep the triple.
-if [ "$PLATFORM" = windows ]; then
-  case "$ARCH" in
-    i686|x86|arm|armeb|armhf|armv7|armv7a|thumb|arm64ec) JVM_VARIANT=zero ;;
-  esac
-fi
-
 # --- per-platform toolchain -------------------------------------------------
 # Dispatch on PLATFORM (not the triple) so the toolchain is chosen explicitly.
 # CC/CXX are exported; AR/NM/STRIP/OBJCOPY are passed as configure variables
