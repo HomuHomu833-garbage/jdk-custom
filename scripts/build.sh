@@ -371,6 +371,20 @@ EOF
       # is harmless, and it heads off the other 34 pragmas as well.
       WIN_HB="-DHB_NO_PRAGMA_GCC_DIAGNOSTIC"
       WIN_CFLAGS="-I$CASE_INC $WIN_DEFS -fms-extensions -Wno-nonportable-include-path $WIN_LAX $WIN_HB"
+
+      # C++ sources only, and 11 only. 11 asks for -std=gnu++98 but keeps it
+      # only if FLAGS_CXX_COMPILER_CHECK_ARGUMENTS can compile with it plus
+      # -Werror, and that check does not survive clang 22, so the JDK libraries
+      # end up with no language level at all and take clang's default of C++17.
+      # throw() was removed in C++17:
+      #   alloc.h:89: error: ISO C++17 does not allow dynamic exception
+      #   specifications [-Wdynamic-exception-spec]
+      # Ask for the level 17 and later set for everything (LANGSTD_CXXFLAGS),
+      # which is new enough for the sources and still allows throw().
+      WIN_CXXSTD=""
+      if [ "$JDK_VERSION" = 11 ]; then
+        WIN_CXXSTD="-std=c++14"
+      fi
       # 32-bit x86 only: hotspot reaches for SEH (__try/__except) in jni.cpp,
       # os_windows.cpp, os_windows_x86.cpp, safefetch_windows.hpp and
       # threadCrashProtection_windows.cpp. clang lowers those into MSVC-style
@@ -387,7 +401,7 @@ EOF
         i686-*) WIN_CFLAGS="$WIN_CFLAGS -fseh-exceptions" ;;
       esac
       EXTRA_CONF+=(--with-extra-cflags="$WIN_CFLAGS"
-                   --with-extra-cxxflags="$WIN_CFLAGS")
+                   --with-extra-cxxflags="$WIN_CFLAGS $WIN_CXXSTD")
     fi
 
     # GetProcAddress returns FARPROC, a function pointer, and C++ has no
@@ -842,21 +856,9 @@ EOF
       sed -i 's/^__declspec(dllexport) //' "$SSPI"
     fi
 
-    # 11 hands AcquireCredentialsHandleW a package name straight from a literal,
-    # and the parameter is LPWSTR rather than LPCWSTR:
-    #   sspi.cpp:944: error: no matching function for call to
-    #   'AcquireCredentialsHandleW'
-    # The two plain-literal call sites survive on clang's MSVC compatibility,
-    # which allows a string literal to lose its const with a warning, but the
-    # third passes a ternary, whose result is an ordinary const wchar_t* rvalue
-    # that the leniency does not cover. 17 casts every one of these to LPWSTR;
-    # do the same to the one that needs it.
-    if [ -f "$SSPI" ] && grep -q 'isSPNEGO ? L"Negotiate" : L"Kerberos",' "$SSPI"; then
-      sed -i 's/isSPNEGO ? L"Negotiate" : L"Kerberos",/(LPWSTR)(isSPNEGO ? L"Negotiate" : L"Kerberos"),/' "$SSPI"
-      grep -q '(LPWSTR)(isSPNEGO ? L"Negotiate" : L"Kerberos")' "$SSPI" || {
-        echo "failed to cast the SSPI package name in sspi.cpp" >&2; exit 1; }
-      log "Casting the SSPI package name to LPWSTR in sspi.cpp"
-    fi
+    # The SSPI package names AcquireCredentialsHandleW wants as LPWSTR are cast
+    # by the JDK-8281525 backport in patches/global/jdk/11, which covers all
+    # three call sites rather than the one that happened to fail.
 
     # jaccessinspectorWindow.rc names its menu cjaccessinspectorMenus, which no
     # header defines, the resource header still calls it cFerretMenus, from

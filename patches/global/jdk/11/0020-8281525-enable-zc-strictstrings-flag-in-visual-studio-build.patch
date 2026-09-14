@@ -1,0 +1,120 @@
+Backport JDK-8281525: Enable Zc:strictStrings flag in Visual Studio build
+
+Upstream turned on /Zc:strictStrings, which makes cl.exe treat string literals
+as const the way the standard says, and fixed everything that broke. clang has
+always been strict, so those same places fail here:
+
+  security.cpp:1288: error: assigning to 'PVOID' (aka 'void *') from
+  incompatible type 'const wchar_t[9]'
+
+Taking the commit gets all three AcquireCredentialsHandle package names in
+sspi.cpp at once, which is where cycle 8 spent a build on one of them, plus
+os_windows.cpp's path prefix, security.cpp's dump() and certificate chain, and
+the OID cast.
+
+Two parts of the upstream commit are left out. The flags-cflags.m4 hunk adds
+/Zc:strictStrings to the microsoft toolchain, which this build never uses, and
+test/hotspot/gtest/runtime/test_os_windows.cpp belongs to the gtest tests that
+are switched off here. libwixhelper.cpp does not exist in 11.
+
+Upstream: https://bugs.openjdk.org/browse/JDK-8281525
+
+diff -u --recursive orig/src/hotspot/os/windows/os_windows.cpp new/src/hotspot/os/windows/os_windows.cpp
+--- a/src/hotspot/os/windows/os_windows.cpp	2026-09-14 14:45:14.916124000 +0300
++++ b/src/hotspot/os/windows/os_windows.cpp	2026-09-14 14:45:35.741644300 +0300
+@@ -4422,7 +4422,7 @@
+   return ERROR_SUCCESS;
+ }
+ 
+-static void set_path_prefix(char* buf, LPWSTR* prefix, int* prefix_off, bool* needs_fullpath) {
++static void set_path_prefix(char* buf, LPCWSTR* prefix, int* prefix_off, bool* needs_fullpath) {
+   *prefix_off = 0;
+   *needs_fullpath = true;
+ 
+@@ -4458,7 +4458,7 @@
+   strncpy(buf, path, buf_len);
+   os::native_path(buf);
+ 
+-  LPWSTR prefix = NULL;
++  LPCWSTR prefix = NULL;
+   int prefix_off = 0;
+   bool needs_fullpath = true;
+   set_path_prefix(buf, &prefix, &prefix_off, &needs_fullpath);
+diff -u --recursive orig/src/java.security.jgss/windows/native/libsspi_bridge/sspi.cpp new/src/java.security.jgss/windows/native/libsspi_bridge/sspi.cpp
+--- a/src/java.security.jgss/windows/native/libsspi_bridge/sspi.cpp	2026-09-14 14:45:15.394460900 +0300
++++ b/src/java.security.jgss/windows/native/libsspi_bridge/sspi.cpp	2026-09-14 14:45:36.717032100 +0300
+@@ -138,7 +138,7 @@
+ }
+ 
+ static void
+-show_time(char* label, TimeStamp* ts)
++show_time(const char* label, TimeStamp* ts)
+ {
+     if (trace) {
+         SYSTEMTIME stLocal;
+@@ -283,7 +283,7 @@
+     }
+ 
+     // Always use the default domain
+-    WCHAR* realm = _wgetenv(L"USERDNSDOMAIN");
++    const WCHAR* realm = _wgetenv(L"USERDNSDOMAIN");
+     if (realm == NULL) {
+         realm = L"";
+     }
+@@ -650,7 +650,7 @@
+         }
+         ss = AcquireCredentialsHandle(
+                 NULL,
+-                L"Kerberos",
++                (LPWSTR)L"Kerberos",
+                 cred_usage == 0 ? SECPKG_CRED_BOTH :
+                     (cred_usage == 1 ? SECPKG_CRED_OUTBOUND : SECPKG_CRED_INBOUND),
+                 NULL,
+@@ -680,7 +680,7 @@
+         auth.PackageListLength = 8;
+         ss = AcquireCredentialsHandle(
+                 NULL,
+-                L"Negotiate",
++                (LPWSTR)L"Negotiate",
+                 cred_usage == 0 ? SECPKG_CRED_BOTH :
+                     (cred_usage == 1 ? SECPKG_CRED_OUTBOUND : SECPKG_CRED_INBOUND),
+                 NULL,
+@@ -938,7 +938,7 @@
+             auth.PackageListLength = 8;
+             ss = AcquireCredentialsHandle(
+                     NULL,
+-                    isSPNEGO ? L"Negotiate" : L"Kerberos",
++                    (LPWSTR)(isSPNEGO ? L"Negotiate" : L"Kerberos"),
+                     SECPKG_CRED_OUTBOUND,
+                     NULL,
+                     isSPNEGO ? &auth : NULL,
+diff -u --recursive orig/src/jdk.crypto.mscapi/windows/native/libsunmscapi/security.cpp new/src/jdk.crypto.mscapi/windows/native/libsunmscapi/security.cpp
+--- a/src/jdk.crypto.mscapi/windows/native/libsunmscapi/security.cpp	2026-09-14 14:45:15.702939000 +0300
++++ b/src/jdk.crypto.mscapi/windows/native/libsunmscapi/security.cpp	2026-09-14 14:45:37.324010700 +0300
+@@ -87,7 +87,7 @@
+ 
+ void showProperty(NCRYPT_HANDLE hKey);
+ 
+-void dump(LPSTR title, PBYTE data, DWORD len)
++void dump(LPCSTR title, PBYTE data, DWORD len)
+ {
+     if (trace) {
+         printf("==== %s ====\n", title);
+@@ -551,7 +551,7 @@
+             // Build certificate chain by using system certificate store.
+             // Add cert chain into collection for any key usage.
+             //
+-            if (GetCertificateChain(OID_EKU_ANY, pCertContext, &pCertChainContext))
++            if (GetCertificateChain((LPSTR)OID_EKU_ANY, pCertContext, &pCertChainContext))
+             {
+                 for (DWORD i = 0; i < pCertChainContext->cChain; i++)
+                 {
+@@ -1285,7 +1285,7 @@
+     BCryptBuffer bb;
+     bb.BufferType = NCRYPTBUFFER_PKCS_SECRET;
+     bb.cbBuffer = 18;
+-    bb.pvBuffer = L"changeit";
++    bb.pvBuffer = (LPWSTR)L"changeit";
+     BCryptBufferDesc bbd;
+     bbd.ulVersion = 0;
+     bbd.cBuffers = 1;
