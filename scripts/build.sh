@@ -10,7 +10,6 @@
 #   JDK_VERSION     feature version: 8 | 11 | 17 | 21 | 25
 #   ROOTDIR         checkout root (default: cwd)
 #   NDK_VERSION/NDK_REVISION  official NDK for the android clang (android only)
-#   MINIAUDIO_VERSION  miniaudio release used for libjsound (linux targets)
 set -euo pipefail
 
 ROOTDIR="${ROOTDIR:-$PWD}"
@@ -21,10 +20,6 @@ BOOT_JDK="${BOOT_JDK:-$ROOTDIR/boot-jdk}"
 ARCH="${TARGET%%-*}"
 BUILD_DIR="$ROOTDIR/build"
 INSTALL_DIR="$ROOTDIR/install"
-MINIAUDIO_VERSION="${MINIAUDIO_VERSION:-0.11.25}"
-# The same file 21 and 25 ship, pinned to a tag; see the config.sub block below.
-CONFIG_SUB_URL="${CONFIG_SUB_URL:-https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12%2B8/make/autoconf/build-aux/autoconf-config.sub}"
-MINIAUDIO_BACKEND="${MINIAUDIO_BACKEND:-$SCRIPT_DIR/../src/libjsound/PLATFORM_API_MiniAudio_PCM.c}"
 cd "$ROOTDIR"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -2044,49 +2039,6 @@ PLEOF
   *) echo "Unknown/unsupported PLATFORM='$PLATFORM'" >&2; exit 1 ;;
 esac
 
-# --- newer-clang fallout ----------------------------------------------------
-# llvm-mingw carries clang 22, well ahead of the NDK and zig clangs. Both fixes
-# are toolchain-driven rather than platform-driven, so they sit outside the
-# windows branch.
-#
-# harfbuzz trips -Wunused-template in its own headers hundreds of times, and the
-# JDK promotes it. Upstream's per-library list is the right place to say
-# otherwise; it just predates the warning. The list moved between releases, so
-# find it rather than name the file.
-hb_warn=0
-while IFS= read -r f; do
-  grep -q 'HARFBUZZ_DISABLED_WARNINGS_clang := ' "$f" || continue
-  grep -q 'HARFBUZZ_DISABLED_WARNINGS_clang := unused-template' "$f" && continue
-  sed -i 's/^\([[:space:]]*HARFBUZZ_DISABLED_WARNINGS_clang := \)/\1unused-template /' "$f"
-  grep -q 'HARFBUZZ_DISABLED_WARNINGS_clang := unused-template ' "$f" || {
-    echo "failed to disable -Wunused-template for harfbuzz in $f" >&2; exit 1; }
-  hb_warn=1
-done < <(find "$SRC/make" -name '*.gmk')
-if [ "$hb_warn" = 1 ]; then
-  log "Disabling -Wunused-template for harfbuzz"
-fi
-
-# Two jpackage headers lean on includes they used to get transitively:
-#   SysInfo.h:83: no type named 'nothrow_t' in namespace 'std'
-#   ResourceEditor.h:105: no type named 'streamsize' in namespace 'std'
-# The second cascades: with streamsize unknown the istream overload of
-# ResourceEditor::apply never declares, so callers resolve to the tstring one.
-RESED="$SRC/src/jdk.jpackage/windows/native/libjpackage/ResourceEditor.h"
-if [ -f "$RESED" ] && grep -q 'std::streamsize' "$RESED" && ! grep -q '^#include <istream>$' "$RESED"; then
-  perl -0pi -e 's/^#include <vector>$/#include <istream>\n#include <vector>/m' "$RESED"
-  grep -q '^#include <istream>$' "$RESED" || {
-    echo "failed to include <istream> in jpackage's ResourceEditor.h" >&2; exit 1; }
-  log "Including <istream> in jpackage's ResourceEditor.h for std::streamsize"
-fi
-
-SYSI="$SRC/src/jdk.jpackage/share/native/common/SysInfo.h"
-if [ -f "$SYSI" ] && grep -q 'std::nothrow_t' "$SYSI" && ! grep -q '^#include <new>$' "$SYSI"; then
-  perl -0pi -e 's/^#include "tstrings\.h"$/#include <new>\n\n#include "tstrings.h"/m' "$SYSI"
-  grep -q '^#include <new>$' "$SYSI" || {
-    echo "failed to include <new> in jpackage's SysInfo.h" >&2; exit 1; }
-  log "Including <new> in jpackage's SysInfo.h for std::nothrow_t"
-fi
-
 # --- tell configure what the build machine is -------------------------------
 # config.guess probes the build system's libc by compiling with $CC, which is a
 # cross compiler here, so it reports the builder as whatever we target. That
@@ -2267,50 +2219,6 @@ if [ "$TARGET_OS" = linux ] || [ "$TARGET_OS" = bsd ]; then
   [ "$JDK_VERSION" = 8 ] && EXTRA_CFLAGS="$EXTRA_CFLAGS -Wno-error"
   EXTRA_CONF+=(--with-cups-include="$DEP_INC" --with-fontconfig-include="$DEP_INC"
                --with-extra-cflags="$EXTRA_CFLAGS")
-fi
-
-# --- a config.sub that knows android ----------------------------------------
-# 8, 11 and 17 ship an autoconf-config.sub from 2008, which predates android and
-# rejects every triple built here, configure stops at "checking host system
-# type" with "Invalid configuration `x86_64-linux-android': system `android' not
-# recognized". 21 and 25 carry a 2022 copy that resolves all of them. Swap the
-# stale file for that same known-good one, and only when the tree's own copy
-# cannot parse this target, so a release that refreshes it is left alone.
-CONFIG_SUB_DIR="$SRC/make/autoconf/build-aux"
-[ -d "$CONFIG_SUB_DIR" ] || CONFIG_SUB_DIR="$SRC/common/autoconf/build-aux"
-if [ -f "$CONFIG_SUB_DIR/config.sub" ] \
-   && ! bash "$CONFIG_SUB_DIR/config.sub" "$TARGET" >/dev/null 2>&1; then
-  log "Refreshing config.sub (the bundled one predates android)"
-  CONFIG_SUB_CACHE="$BUILD_DIR/autoconf-config.sub"
-  if [ ! -f "$CONFIG_SUB_CACHE" ]; then
-    mkdir -p "$BUILD_DIR"
-    fetch --dir="$BUILD_DIR" -o autoconf-config.sub "$CONFIG_SUB_URL"
-  fi
-  cp "$CONFIG_SUB_CACHE" "$CONFIG_SUB_DIR/autoconf-config.sub"
-  bash "$CONFIG_SUB_DIR/config.sub" "$TARGET" >/dev/null 2>&1 || {
-    echo "refreshed config.sub still cannot parse '$TARGET'" >&2; exit 1; }
-fi
-
-# --- jdk8: give the clang toolchain a PIC flag ------------------------------
-# 8 sets PICFLAG only for gcc; the clang branch leaves it empty, because 8's
-# clang support was written for macosx, where PIC is the default and saying so
-# is unnecessary. Everywhere else that means the JDK's own shared libraries are
-# compiled without -fPIC and every one of them fails to link:
-#   ld.lld: error: relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against
-#   symbol 'TT_RunIns'; recompile with -fPIC
-# Give clang what gcc gets, except where the flag is meaningless: macosx has PIC
-# by default, and windows has no such concept. 8 ships a checked-in
-# generated-configure.sh alongside the .m4, so both carry the change.
-if [ "$JDK_VERSION" = 8 ]; then
-  pic_patched=0
-  for f in "$SRC/common/autoconf/flags.m4" "$SRC/common/autoconf/generated-configure.sh"; do
-    [ -f "$f" ] || continue
-    grep -q "^      PICFLAG=''\$" "$f" || continue
-    sed -i "s%^      PICFLAG=''\$%      case \$OPENJDK_TARGET_OS in\n        macosx|windows) PICFLAG='' ;;\n        *) PICFLAG='-fPIC' ;;\n      esac%" "$f"
-    pic_patched=1
-  done
-  [ "$pic_patched" = 1 ] || {
-    echo "unexpected jdk8 tree: no empty clang PICFLAG to set" >&2; exit 1; }
 fi
 
 # --- configure --------------------------------------------------------------
