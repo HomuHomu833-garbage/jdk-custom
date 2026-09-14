@@ -1012,6 +1012,27 @@ EOF
       log "Emitting import libraries the mingw way, and not for the build tools"
     fi
 
+    # The manifest recipe runs MT, which is empty without cl.exe, so the line
+    # expands to one starting with -manifest. Make reads that leading dash as
+    # ignore-errors, strips it and runs "manifest", 71 times per build:
+    #   /usr/bin/bash: line 1: manifest: command not found
+    # Nothing was embedded either way, so gate it on the toolchain until the
+    # mingw path grows a real manifest resource.
+    if [ -f "$NCG" ] && grep -q -- '-outputresource:' "$NCG"; then
+      awk '
+        index($0, "-outputresource:") {
+          print "                  ifeq ($(TOOLCHAIN_TYPE), microsoft)"
+          print $0
+          print "                  endif"
+          next
+        }
+        { print }
+      ' "$NCG" > "$NCG.tmp" && mv "$NCG.tmp" "$NCG"
+      grep -B1 -- '-outputresource:' "$NCG" | grep -q 'TOOLCHAIN_TYPE), microsoft' || {
+        echo "failed to gate the manifest recipe in NativeCompilation.gmk" >&2; exit 1; }
+      log "Running the manifest tool only for the microsoft toolchain"
+    fi
+
     # jdk.pack keys its whole windows block on _MSC_VER, so mingw takes the unix
     # branch and gets the two-argument mkdir:
     #   utils.cpp:75: error: no matching function for call to 'mkdir'
@@ -1034,6 +1055,18 @@ EOF
       grep -q '^#define MKDIR(dir) mkdir(dir)$' "$PACKDEF" || {
         echo "failed to give jdk.pack the one-argument mkdir" >&2; exit 1; }
       log "Using the one-argument mkdir in jdk.pack"
+    fi
+
+    # Lib-jdk.accessibility.gmk asks for AccessBridgeStatusWindow.rc while the
+    # file on disk is spelled .RC, which only works on a case-insensitive
+    # filesystem:
+    #   No rule to make target '.../common/AccessBridgeStatusWindow.rc'
+    # It is the only uppercase .RC in the tree, so rename the file rather than
+    # patch the three makefile references.
+    ABRC="$SRC/src/jdk.accessibility/windows/native/common/AccessBridgeStatusWindow"
+    if [ -f "$ABRC.RC" ] && [ ! -f "$ABRC.rc" ]; then
+      mv "$ABRC.RC" "$ABRC.rc"
+      log "Renamed AccessBridgeStatusWindow.RC to the spelling its makefile uses"
     fi
 
     # mlib_sys.c picks its aligned allocator with #if defined(_MSC_VER), and
