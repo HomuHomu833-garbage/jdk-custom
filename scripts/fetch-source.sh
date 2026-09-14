@@ -203,6 +203,24 @@ if [ "${PLATFORM:-}" = windows ]; then
           mkdir -p "$PORT_DST"
           cp "$PORT_SRC"/* "$PORT_DST/"
           log "Installed the windows_arm hotspot port ($(ls -1 "$PORT_DST" | wc -l) files)"
+          # os::fetch_bcp_from_context arrived in 24. The port carries it, so
+          # drop it, and the assert helper only it uses, where os.hpp does not
+          # declare it, rather than keeping a second copy of the file.
+          if ! grep -q 'fetch_bcp_from_context' "$SRC/src/hotspot/share/runtime/os.hpp"; then
+            python3 - "$PORT_DST/os_windows_arm.cpp" <<'PYEOF'
+import io, sys
+p = sys.argv[1]
+s = io.open(p, encoding='utf-8', newline='').read()
+start = s.index('#ifdef ASSERT\nstatic bool is_interpreter')
+end = s.index('\n', s.index('intptr_t* os::fetch_bcp_from_context'))
+end = s.index('\n}\n', end) + len('\n}\n')
+io.open(p, 'w', encoding='utf-8', newline='').write(s[:start] + s[end:])
+PYEOF
+            if grep -q 'fetch_bcp_from_context' "$PORT_DST/os_windows_arm.cpp"; then
+              echo "failed to drop fetch_bcp_from_context from the windows_arm port" >&2; exit 1
+            fi
+            log "Dropping fetch_bcp_from_context, which this release does not declare"
+          fi
         else
           echo "windows_arm port sources missing at $PORT_SRC" >&2; exit 1
         fi
@@ -229,6 +247,10 @@ orig = s
 def sub(old, new, label, want=1):
     global s
     n = s.count(old)
+    if want == "optional":
+        if n:
+            s = s.replace(old, new)
+        return
     if n != want:
         raise SystemExit("os_windows.cpp: %s matched %d times, expected %d"
                          % (label, n, want))
@@ -320,6 +342,17 @@ sub("defined(AMD64) || defined(_M_ARM64)\n"
     "defined(AMD64) || defined(_M_ARM64) || defined(_M_ARM)\n"
     "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n",
     "sampling_context_flags")
+
+# 21 and earlier keep their 32-bit windows code behind #ifndef _WIN64, and all
+# of it is x86-32: stdcall name decoration, the NX protection checks, the FLT
+# control word handler and the fast JNI accessor's __try. 32-bit ARM is not
+# _WIN64 either, so it would compile every one of them:
+#   os_windows.cpp: no member named 'Eip' in '_CONTEXT'
+#   os_windows.cpp: use of undeclared identifier 'handle_FLT_exception'
+# 25 dropped 32-bit windows and has none of these blocks left.
+sub("#ifndef _WIN64\n",
+    "#if !defined(_WIN64) && !defined(_M_ARM)\n",
+    "32-bit windows blocks", want="optional")
 
 if s == orig:
     raise SystemExit("os_windows.cpp: nothing changed")
