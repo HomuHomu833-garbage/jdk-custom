@@ -842,6 +842,22 @@ EOF
       sed -i 's/^__declspec(dllexport) //' "$SSPI"
     fi
 
+    # 11 hands AcquireCredentialsHandleW a package name straight from a literal,
+    # and the parameter is LPWSTR rather than LPCWSTR:
+    #   sspi.cpp:944: error: no matching function for call to
+    #   'AcquireCredentialsHandleW'
+    # The two plain-literal call sites survive on clang's MSVC compatibility,
+    # which allows a string literal to lose its const with a warning, but the
+    # third passes a ternary, whose result is an ordinary const wchar_t* rvalue
+    # that the leniency does not cover. 17 casts every one of these to LPWSTR;
+    # do the same to the one that needs it.
+    if [ -f "$SSPI" ] && grep -q 'isSPNEGO ? L"Negotiate" : L"Kerberos",' "$SSPI"; then
+      sed -i 's/isSPNEGO ? L"Negotiate" : L"Kerberos",/(LPWSTR)(isSPNEGO ? L"Negotiate" : L"Kerberos"),/' "$SSPI"
+      grep -q '(LPWSTR)(isSPNEGO ? L"Negotiate" : L"Kerberos")' "$SSPI" || {
+        echo "failed to cast the SSPI package name in sspi.cpp" >&2; exit 1; }
+      log "Casting the SSPI package name to LPWSTR in sspi.cpp"
+    fi
+
     # jaccessinspectorWindow.rc names its menu cjaccessinspectorMenus, which no
     # header defines, the resource header still calls it cFerretMenus, from
     # before the tool was renamed. MSVC's rc quietly treats an unknown

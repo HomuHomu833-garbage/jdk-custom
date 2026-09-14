@@ -1,0 +1,66 @@
+Backport JDK-8225032: Fix some C++ conformance issues in AWT Windows code
+
+JavaStringBuffer::getNonEmptyString returns either m_pStr or the literal L"",
+so its return type has to be const. 11 declares it LPWSTR and MSVC accepts the
+narrowing; clang does not:
+
+  awt.h:341: error: cannot initialize return object of type 'LPWSTR'
+  (aka 'wchar_t *') with an rvalue of type 'const wchar_t *'
+
+17 made the return type, the conversion operator and GetData const, which is
+this commit. Two unrelated conformance fixes ride along in it: a member
+declared with a qualified name (AwtComponent::JavaKeyToWindowsKey inside the
+class), and an LPTSTR that should be LPCTSTR in AwtPrintControl::FindPrinter.
+Both are the same kind of thing clang refuses and cl.exe waves through, so the
+commit is taken whole rather than split.
+
+Upstream: https://bugs.openjdk.org/browse/JDK-8225032
+
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt.h new/src/java.desktop/windows/native/libawt/windows/awt.h
+--- a/src/java.desktop/windows/native/libawt/windows/awt.h	2026-09-14 14:12:10.214961000 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt.h	2026-09-14 14:12:20.439447800 +0300
+@@ -337,7 +337,7 @@
+ protected:
+     LPWSTR m_pStr;
+     jsize  m_dwSize;
+-    LPWSTR getNonEmptyString() {
++    LPCWSTR getNonEmptyString() {
+         return (NULL==m_pStr)
+                 ? L""
+                 : m_pStr;
+@@ -378,9 +378,9 @@
+         m_pStr = (LPWSTR)SAFE_SIZE_ARRAY_REALLOC(safe_Realloc, m_pStr, m_dwSize+1, sizeof(WCHAR) );
+     }
+     //we are in UNICODE now, so LPWSTR:=:LPTSTR
+-    operator LPWSTR() { return getNonEmptyString(); }
++    operator LPCWSTR() { return getNonEmptyString(); }
+     operator LPARAM() { return (LPARAM)getNonEmptyString(); }
+-    void *GetData() { return (void *)getNonEmptyString(); }
++    const void *GetData() { return (const void *)getNonEmptyString(); }
+     jsize  GetSize() { return m_dwSize; }
+ };
+ 
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_Component.h new/src/java.desktop/windows/native/libawt/windows/awt_Component.h
+--- a/src/java.desktop/windows/native/libawt/windows/awt_Component.h	2026-09-14 14:12:10.666729800 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_Component.h	2026-09-14 14:12:20.482755200 +0300
+@@ -450,7 +450,7 @@
+     static void JavaKeyToWindowsKey(UINT javaKey, UINT *windowsKey, UINT *modifiers, UINT originalWindowsKey);
+     static void UpdateDynPrimaryKeymap(UINT wkey, UINT jkeyLegacy, jint keyLocation, UINT modifiers);
+ 
+-    INLINE static void AwtComponent::JavaKeyToWindowsKey(UINT javaKey,
++    INLINE static void JavaKeyToWindowsKey(UINT javaKey,
+                                        UINT *windowsKey, UINT *modifiers)
+     {
+         JavaKeyToWindowsKey(javaKey, windowsKey, modifiers, IGNORE_KEY);
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_PrintControl.cpp new/src/java.desktop/windows/native/libawt/windows/awt_PrintControl.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/awt_PrintControl.cpp	2026-09-14 14:12:11.372401400 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_PrintControl.cpp	2026-09-14 14:12:20.521016900 +0300
+@@ -130,7 +130,7 @@
+     DWORD cbBuf = *pcbBuf, dummyWord = 0;
+ 
+     JavaStringBuffer printerNameBuf(env, printerName);
+-    LPTSTR lpcPrinterName = (LPTSTR)printerNameBuf;
++    LPCTSTR lpcPrinterName = (LPCTSTR)printerNameBuf;
+     DASSERT(lpcPrinterName != NULL);
+ 
+     // For NT, first do a quick check of all remote and local printers.
