@@ -8,14 +8,21 @@
  * Why: OpenJDK's only unix PCM backend is ALSA, and it needs <alsa/asoundlib.h>
  * at build time and libasound.so.2 at run time. No cross sysroot used by this
  * repository ships either, and bionic devices have no ALSA at all, so those
- * builds shipped with no native sound provider whatsoever. miniaudio declares
- * the backend symbols itself and dlopen()s whatever the machine actually has --
- * PulseAudio/ALSA/JACK/sndio/OSS on unix, AAudio/OpenSL ES on android -- so
- * there is no build-time dependency and one binary works on all of them.
+ * builds shipped with no native sound provider whatsoever. The BSDs are worse
+ * still: OpenJDK has no BSD sound sources at all (src/java.desktop/bsd has no
+ * native/ directory), so they get the shared DirectAudio layer with nothing
+ * underneath it. miniaudio declares the backend symbols itself and resolves
+ * whatever the machine actually has at run time -- PulseAudio/ALSA/JACK on
+ * linux, sndio/audio(4)/OSS on the BSDs, AAudio/OpenSL ES on android, WASAPI/
+ * DirectSound/WinMM on windows, Core Audio on macOS -- so there is no
+ * build-time dependency and one implementation covers every target.
  *
- * Scope: this implements DirectAudio (SourceDataLine/TargetDataLine) only. The
- * ports (mixer control) and MIDI providers are compiled out by the build --
- * miniaudio has no equivalent for either. See scripts/build.sh.
+ * Scope: this implements DirectAudio (SourceDataLine/TargetDataLine) only, and
+ * it is the PCM provider on every platform this repository builds. The ports
+ * (mixer control) and MIDI providers have no miniaudio equivalent: on windows
+ * and macOS the native ones are kept alongside this file, and on linux, android
+ * and the BSDs -- where there is no native implementation to keep -- they are
+ * compiled out. See scripts/build.sh.
  *
  * Model: one mixer, index 0, which is whatever the system calls its default
  * device. Each open line gets its own ma_device plus a single-producer/
@@ -48,11 +55,9 @@
 #define MA_NO_ENGINE
 #include "miniaudio.h"
 
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "DirectAudio.h"
 
@@ -101,12 +106,30 @@ typedef struct tag_MiniAudioPcmInfo {
  */
 static ma_context     theContext;
 static int            theContextState = 0;
+
+/*
+ * The one lock this file needs guards that lazily created context, so it has to
+ * be usable from a static initialiser -- there is no init hook to run first.
+ * POSIX has PTHREAD_MUTEX_INITIALIZER for that and windows has SRWLOCK_INIT;
+ * miniaudio's own ma_mutex needs a runtime ma_mutex_init, which is exactly what
+ * cannot be arranged here. Both are plain blocking locks, held for the length of
+ * one context init.
+ */
+#if defined(_WIN32)
+static SRWLOCK theContextLock = SRWLOCK_INIT;
+#define MA_JSOUND_LOCK()   AcquireSRWLockExclusive(&theContextLock)
+#define MA_JSOUND_UNLOCK() ReleaseSRWLockExclusive(&theContextLock)
+#else
+#include <pthread.h>
 static pthread_mutex_t theContextLock = PTHREAD_MUTEX_INITIALIZER;
+#define MA_JSOUND_LOCK()   pthread_mutex_lock(&theContextLock)
+#define MA_JSOUND_UNLOCK() pthread_mutex_unlock(&theContextLock)
+#endif
 
 static ma_context* getContext(void) {
     ma_context* result = NULL;
 
-    pthread_mutex_lock(&theContextLock);
+    MA_JSOUND_LOCK();
     if (theContextState == 0) {
         ma_context_config config = ma_context_config_init();
         if (ma_context_init(NULL, 0, &config, &theContext) == MA_SUCCESS) {
@@ -118,16 +141,17 @@ static ma_context* getContext(void) {
     if (theContextState == 1) {
         result = &theContext;
     }
-    pthread_mutex_unlock(&theContextLock);
+    MA_JSOUND_UNLOCK();
     return result;
 }
 
+/*
+ * miniaudio's own sleep: nanosleep on POSIX, Sleep on windows, and it is
+ * already in scope from the implementation above, so this needs no second
+ * platform switch of its own.
+ */
 static void napMillis(long millis) {
-    struct timespec ts;
-
-    ts.tv_sec = (time_t) (millis / 1000);
-    ts.tv_nsec = (long) ((millis % 1000) * 1000000L);
-    nanosleep(&ts, NULL);
+    ma_sleep((ma_uint32) millis);
 }
 
 /*
