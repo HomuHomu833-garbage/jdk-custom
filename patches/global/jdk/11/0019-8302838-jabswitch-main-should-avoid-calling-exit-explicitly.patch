@@ -1,0 +1,36 @@
+Backport JDK-8302838: jabswitch main() should avoid calling exit explicitly
+
+jabswitch declares "void main", which cl.exe accepts and clang does not:
+
+  jabswitch.cpp:443: error: 'main' must return 'int'
+
+Upstream made it return int, and in the same change dropped the explicit
+exit(error) it used to make the exit status visible, returning the value
+instead. Taken together, since returning int without the return statement would
+silently change the exit status the tests look at.
+
+Upstream: https://bugs.openjdk.org/browse/JDK-8302838
+
+diff -u --recursive orig/src/jdk.accessibility/windows/native/jabswitch/jabswitch.cpp new/src/jdk.accessibility/windows/native/jabswitch/jabswitch.cpp
+--- a/src/jdk.accessibility/windows/native/jabswitch/jabswitch.cpp	2026-09-14 14:25:29.864867800 +0300
++++ b/src/jdk.accessibility/windows/native/jabswitch/jabswitch.cpp	2026-09-14 14:28:36.618895200 +0300
+@@ -440,7 +440,7 @@
+     return err;
+ }
+ 
+-void main(int argc, char* argv[]) {
++int main(int argc, char* argv[]) {
+     bool enableWasRequested = false;
+     bool disableWasRequested = false;
+     bool badParams = true;
+@@ -488,9 +488,6 @@
+         } else {
+             printf("disabled.\n");
+         }
+-        // Use exit so test case can sense for error.
+-        if (error != 0) {
+-            exit(error);
+-        }
+     }
++    return error;
+ }

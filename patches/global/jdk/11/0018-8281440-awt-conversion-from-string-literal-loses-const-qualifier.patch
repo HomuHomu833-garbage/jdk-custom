@@ -1,0 +1,233 @@
+Backport JDK-8281440: AWT: Conversion from string literal loses const qualifier
+
+A string literal is const, and the windows AWT code assigns them to LPTSTR,
+LPWSTR and char* in twenty places. cl.exe allows that; clang refuses it:
+
+  awt_PrintControl.cpp:1054: error: cannot initialize a variable of type
+  'LPTSTR' (aka 'wchar_t *') with an rvalue of type 'const wchar_t *'
+
+The failing build named two lines in one file, but they are one instance of a
+class upstream already swept in a single commit, so take the whole sweep rather
+than meet the other eighteen one build at a time. Where the value really is
+handed to an API that wants a mutable pointer the fix is a cast, and where it
+is only read it becomes const.
+
+Upstream: https://bugs.openjdk.org/browse/JDK-8281440
+
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/WPrinterJob.cpp new/src/java.desktop/windows/native/libawt/windows/WPrinterJob.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/WPrinterJob.cpp	2026-09-14 14:25:25.687187300 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/WPrinterJob.cpp	2026-09-14 14:26:08.546898200 +0300
+@@ -729,7 +729,7 @@
+   }
+ 
+   jstring jPort;
+-  LPTSTR printerName = NULL, printerPort = TEXT("LPT1");
++  LPTSTR printerName = NULL, printerPort = (LPTSTR)TEXT("LPT1");
+   LPBYTE buffer = NULL;
+   DWORD cbBuf = 0;
+ 
+@@ -745,7 +745,7 @@
+   }
+ 
+   if (printerPort == NULL) {
+-    printerPort = TEXT("LPT1");
++    printerPort = (LPTSTR)TEXT("LPT1");
+   }
+   jPort = JNU_NewStringPlatform(env, printerPort);
+   delete [] buffer;
+@@ -1110,7 +1110,7 @@
+   // Fill in the structure with info about this "document."
+   DocInfo.pDocName = jname;
+   DocInfo.pOutputFile = NULL;
+-  DocInfo.pDatatype = TEXT("RAW");
++  DocInfo.pDatatype = (LPTSTR)TEXT("RAW");
+ 
+   // Inform the spooler the document is beginning.
+   if( (::StartDocPrinter(hPrinter, 1, (LPBYTE)&DocInfo)) == 0 ) {
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_Debug.cpp new/src/java.desktop/windows/native/libawt/windows/awt_Debug.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/awt_Debug.cpp	2026-09-14 14:25:26.091755900 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_Debug.cpp	2026-09-14 14:25:50.802198100 +0300
+@@ -193,7 +193,7 @@
+                   NULL);
+ 
+     if (msgBuffer == NULL) {
+-        msgBuffer = "<Could not get GetLastError() message text>";
++        msgBuffer = (LPSTR)"<Could not get GetLastError() message text>";
+     }
+     // format the assertion message
+     _snprintf(assertMsg, ASSERT_MSG_SIZE, AssertFmt, expr, file, line, lastError, msgBuffer);
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_DesktopProperties.cpp new/src/java.desktop/windows/native/libawt/windows/awt_DesktopProperties.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/awt_DesktopProperties.cpp	2026-09-14 14:25:26.512781100 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_DesktopProperties.cpp	2026-09-14 14:25:51.875225900 +0300
+@@ -138,7 +138,7 @@
+ // Note that it uses malloc() and returns the pointer to allocated
+ // memory, so remember to use free() when you are done with its
+ // result.
+-static LPTSTR resolveShellDialogFont(LPTSTR fontName, HKEY handle) {
++static LPTSTR resolveShellDialogFont(LPCTSTR fontName, HKEY handle) {
+     DWORD valueType, valueSize;
+     if (RegQueryValueEx((HKEY)handle, fontName, NULL,
+                         &valueType, NULL, &valueSize) != 0) {
+@@ -164,7 +164,7 @@
+ // memory, so remember to use free() when you are done with its
+ // result.
+ static LPTSTR resolveShellDialogFont() {
+-    LPTSTR subKey = TEXT("Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes");
++    LPCTSTR subKey = TEXT("Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes");
+ 
+     HKEY handle;
+     if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, subKey, 0, KEY_READ, &handle) != 0) {
+@@ -183,7 +183,7 @@
+ // Note that it uses malloc() and returns the pointer to allocated
+ // memory, so remember to use free() when you are done with its
+ // result.
+-static LPTSTR getWindowsPropFromReg(LPTSTR subKey, LPTSTR valueName, DWORD *valueType) {
++static LPTSTR getWindowsPropFromReg(LPCTSTR subKey, LPCTSTR valueName, DWORD *valueType) {
+     HKEY handle;
+     if (RegOpenKeyEx(HKEY_CURRENT_USER, subKey, 0, KEY_READ, &handle) != 0) {
+         return NULL;
+@@ -221,7 +221,7 @@
+     }
+ }
+ 
+-static LPTSTR getXPStylePropFromReg(LPTSTR valueName) {
++static LPTSTR getXPStylePropFromReg(LPCTSTR valueName) {
+     DWORD valueType;
+     return getWindowsPropFromReg(TEXT("Software\\Microsoft\\Windows\\CurrentVersion\\ThemeManager"),
+                                  valueName, &valueType);
+@@ -651,11 +651,11 @@
+         throw;
+     }
+ 
+-    LPTSTR valueName = TEXT("PlaceN");
++    LPCTSTR valueName = TEXT("PlaceN");
+     LPTSTR valueNameBuf = (LPTSTR)SAFE_SIZE_ARRAY_ALLOC(safe_Malloc, (lstrlen(valueName) + 1), sizeof(TCHAR));
+     lstrcpy(valueNameBuf, valueName);
+ 
+-    LPTSTR propKey = TEXT("win.comdlg.placesBarPlaceN");
++    LPCTSTR propKey = TEXT("win.comdlg.placesBarPlaceN");
+ 
+     LPTSTR propKeyBuf;
+     try {
+@@ -672,7 +672,7 @@
+         valueNameBuf[5] = _T('0' + i++);
+         propKeyBuf[25] = valueNameBuf[5];
+ 
+-        LPTSTR key = TEXT("Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\comdlg32\\PlacesBar");
++        LPCTSTR key = TEXT("Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\comdlg32\\PlacesBar");
+         try {
+             value = NULL;
+             if ((value = getWindowsPropFromReg(key, valueNameBuf, &valueType)) != NULL) {
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_DrawingSurface.cpp new/src/java.desktop/windows/native/libawt/windows/awt_DrawingSurface.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/awt_DrawingSurface.cpp	2026-09-14 14:25:26.993788700 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_DrawingSurface.cpp	2026-09-14 14:26:08.448270800 +0300
+@@ -275,7 +275,7 @@
+ 
+ // EmbeddedFrame support
+ 
+-static char *const embeddedClassName = "sun/awt/windows/WEmbeddedFrame";
++static const char *const embeddedClassName = "sun/awt/windows/WEmbeddedFrame";
+ 
+ JNIEXPORT jobject JNICALL awt_CreateEmbeddedFrame
+ (JNIEnv* env, void* platformInfo)
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_Font.cpp new/src/java.desktop/windows/native/libawt/windows/awt_Font.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/awt_Font.cpp	2026-09-14 14:25:27.498231000 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_Font.cpp	2026-09-14 14:25:52.584458900 +0300
+@@ -345,7 +345,7 @@
+                 wName = L"Arial";
+             }
+ 
+-            WCHAR* wEName;
++            LPCWSTR wEName;
+             if (!wcscmp(wName, L"Helvetica") || !wcscmp(wName, L"SansSerif")) {
+                 wEName = L"Arial";
+             } else if (!wcscmp(wName, L"TimesRoman") ||
+@@ -388,7 +388,7 @@
+     return awtFont;
+ }
+ 
+-static void strip_tail(wchar_t* text, wchar_t* tail) { // strips tail and any possible whitespace before it from the end of text
++static void strip_tail(wchar_t* text, const wchar_t* tail) { // strips tail and any possible whitespace before it from the end of text
+     if (wcslen(text)<=wcslen(tail)) {
+         return;
+     }
+@@ -495,7 +495,7 @@
+     return hFont;
+ }
+ 
+-HFONT AwtFont::CreateHFont(WCHAR* name, int style, int height,
++HFONT AwtFont::CreateHFont(LPCWSTR name, int style, int height,
+                            int angle, float awScale)
+ {
+     WCHAR longName[80];
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_Font.h new/src/java.desktop/windows/native/libawt/windows/awt_Font.h
+--- a/src/java.desktop/windows/native/libawt/windows/awt_Font.h	2026-09-14 14:25:27.964102300 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_Font.h	2026-09-14 14:25:52.769596100 +0300
+@@ -155,7 +155,7 @@
+      */
+     static AwtFont* Create(JNIEnv *env, jobject font,
+                            jint angle = 0, jfloat awScale=1.0f);
+-    static HFONT CreateHFont(WCHAR* name, int style, int height,
++    static HFONT CreateHFont(LPCWSTR name, int style, int height,
+                              int angle = 0, float awScale=1.0f);
+ 
+     static void Cleanup();
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_PrintControl.cpp new/src/java.desktop/windows/native/libawt/windows/awt_PrintControl.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/awt_PrintControl.cpp	2026-09-14 14:25:28.237443400 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_PrintControl.cpp	2026-09-14 14:25:52.964309700 +0300
+@@ -1045,7 +1045,7 @@
+         DEVNAMES *devnames = (DEVNAMES*)::GlobalLock(pd.hDevNames);
+         DASSERT(!IsBadReadPtr(devnames, sizeof(DEVNAMES)));
+         LPTSTR lpcNames = (LPTSTR)devnames;
+-        LPTSTR pbuf = (_tcslen(lpcNames + devnames->wDeviceOffset) == 0 ?
++        LPCTSTR pbuf = (_tcslen(lpcNames + devnames->wDeviceOffset) == 0 ?
+                       TEXT("") : lpcNames + devnames->wDeviceOffset);
+         if (pbuf != NULL) {
+             jstring jstr = JNU_NewStringPlatform(env, pbuf);
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_PrintJob.cpp new/src/java.desktop/windows/native/libawt/windows/awt_PrintJob.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/awt_PrintJob.cpp	2026-09-14 14:25:28.740260000 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_PrintJob.cpp	2026-09-14 14:25:53.502291400 +0300
+@@ -65,8 +65,8 @@
+ 
+ /*** Private Constants ***/
+ 
+-static char *kJavaIntStr = "I";
+-static char *kJavaLongStr = "J";
++static const char *kJavaIntStr = "I";
++static const char *kJavaLongStr = "J";
+ 
+ /* 2D printing uses 3 byte BGR pixels in Raster printing */
+ static int J2DRasterBPP = 3;
+@@ -1355,7 +1355,7 @@
+     } else {
+         destination = VerifyDestination(env, self);
+     }
+-    LPTSTR docname = NULL;
++    LPCTSTR docname = NULL;
+     if (jobname != NULL) {
+         LPTSTR tmp = (LPTSTR)JNU_GetStringPlatformChars(env, jobname, NULL);
+         if (tmp == NULL) {
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_Toolkit.cpp new/src/java.desktop/windows/native/libawt/windows/awt_Toolkit.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/awt_Toolkit.cpp	2026-09-14 14:25:29.220972000 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_Toolkit.cpp	2026-09-14 14:25:53.708865900 +0300
+@@ -530,7 +530,7 @@
+     JNIEnv *env;
+     JavaVMAttachArgs attachArgs;
+     attachArgs.version  = JNI_VERSION_1_2;
+-    attachArgs.name     = "AWT-Windows";
++    attachArgs.name     = (char*)"AWT-Windows";
+     attachArgs.group    = data->threadGroup;
+ 
+     jint res = jvm->AttachCurrentThreadAsDaemon((void **)&env, &attachArgs);
+diff -u --recursive orig/src/java.desktop/windows/native/libawt/windows/awt_Win32GraphicsEnv.cpp new/src/java.desktop/windows/native/libawt/windows/awt_Win32GraphicsEnv.cpp
+--- a/src/java.desktop/windows/native/libawt/windows/awt_Win32GraphicsEnv.cpp	2026-09-14 14:25:29.625766500 +0300
++++ b/src/java.desktop/windows/native/libawt/windows/awt_Win32GraphicsEnv.cpp	2026-09-14 14:25:53.892153400 +0300
+@@ -234,7 +234,7 @@
+     unsigned long fontPathLen = MAX_PATH + 1;
+     WCHAR  tmpPath[MAX_PATH + 1];
+     LPWSTR fontPath = fontPathBuf;
+-    LPWSTR eudcKey = NULL;
++    LPCWSTR eudcKey = NULL;
+ 
+     LANGID langID = GetSystemDefaultLangID();
+     //lookup for encoding ID, EUDC only supported in
