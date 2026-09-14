@@ -181,6 +181,26 @@ apply_set "$PATCHES_DIR/global/jdk/$JDK_VERSION" strict
 # indentation it had in build.sh's platform case: five heredocs below would
 # break if these lines were re-indented.
 if [ "${PLATFORM:-}" = windows ]; then
+    # Upstream has no windows port for 32-bit ARM: hotspot builds os_cpu from
+    # <os>_<cpu>, and only windows_x86 and windows_aarch64 exist, so the VM stops
+    # at "globals_windows_arm.hpp file not found". The port lives in this repo
+    # rather than in a patch because the directory is new in every release, so a
+    # patch would have to be duplicated once per version. arm64ec is deliberately
+    # not matched here: it is 64-bit and configures as aarch64.
+    case "${TARGET:-}" in
+      arm-w64-mingw32|armv7*-w64-mingw32|thumb*-w64-mingw32)
+        PORT_SRC="$SCRIPT_DIR/../src/hotspot/os_cpu/windows_arm"
+        PORT_DST="$SRC/src/hotspot/os_cpu/windows_arm"
+        if [ -d "$PORT_SRC" ]; then
+          mkdir -p "$PORT_DST"
+          cp "$PORT_SRC"/* "$PORT_DST/"
+          log "Installed the windows_arm hotspot port ($(ls -1 "$PORT_DST" | wc -l) files)"
+        else
+          echo "windows_arm port sources missing at $PORT_SRC" >&2; exit 1
+        fi
+        ;;
+    esac
+
     # Two configure assumptions keyed on the target OS rather than on the build
     # host or the compiler:
     #   basic.m4 runs BASIC_SETUP_PATHS_WINDOWS whenever the target is windows,
