@@ -203,6 +203,52 @@ if [ "${PLATFORM:-}" = windows ]; then
           mkdir -p "$PORT_DST"
           cp "$PORT_SRC"/* "$PORT_DST/"
           log "Installed the windows_arm hotspot port ($(ls -1 "$PORT_DST" | wc -l) files)"
+
+          # Most of this directory is os_cpu/linux_arm under another name, and
+          # that tree moves between releases in both content and file names:
+          # thread_* became javaThread_* in 21, copy_*.inline.hpp became
+          # copy_*.hpp, 17 writes "memval_lo + 1" where 25 writes
+          # as_Register(memval_lo->encoding() + 1). So mirror the release's own
+          # linux_arm set rather than carrying a fixed copy, and keep only the
+          # files that are genuinely different on windows.
+          ARM_SRC="$SRC/src/hotspot/os_cpu/linux_arm"
+          A64_SRC="$SRC/src/hotspot/os_cpu/windows_aarch64"
+          for d in "$ARM_SRC" "$A64_SRC"; do
+            [ -d "$d" ] || { echo "expected $d in this release" >&2; exit 1; }
+          done
+          for f in "$ARM_SRC"/*; do
+            b=$(basename "$f")
+            case "$b" in
+              # linux assembly with no windows counterpart, and the files the
+              # port replaces outright
+              *.S|*.s) continue ;;
+              os_linux_arm.cpp|thread_linux_arm.cpp|javaThread_linux_arm.cpp) continue ;;
+              vm_version_linux_arm_32.cpp|atomic_linux_arm.hpp) continue ;;
+              copy_linux_arm.hpp|copy_linux_arm.inline.hpp) continue ;;
+              globals_linux_arm.hpp|vmStructs_linux_arm.hpp) continue ;;
+              # only the releases that include OS_CPU_HEADER(os) want this one
+              os_linux_arm.hpp)
+                grep -q 'OS_CPU_HEADER(os)' "$SRC/src/hotspot/share/runtime/os.hpp" || continue ;;
+            esac
+            out=$(echo "$b" | sed 's/linux_arm/windows_arm/')
+            sed -e 's/LINUX_ARM/WINDOWS_ARM/g' -e 's/linux_arm/windows_arm/g' "$f" > "$PORT_DST/$out"
+          done
+          # vmStructs and the inline os header are OS-shaped, not CPU-shaped, so
+          # they come from the windows port instead.
+          for b in vmStructs_windows_aarch64.hpp os_windows_aarch64.inline.hpp; do
+            [ -f "$A64_SRC/$b" ] || continue
+            out=$(echo "$b" | sed 's/windows_aarch64/windows_arm/')
+            sed -e 's/WINDOWS_AARCH64/WINDOWS_ARM/g' -e 's/windows_aarch64/windows_arm/g'                 "$A64_SRC/$b" > "$PORT_DST/$out"
+          done
+          # The port's own javaThread body follows the release's spelling.
+          if [ -f "$ARM_SRC/thread_linux_arm.cpp" ] && [ -f "$PORT_DST/javaThread_windows_arm.cpp" ]; then
+            mv "$PORT_DST/javaThread_windows_arm.cpp" "$PORT_DST/thread_windows_arm.cpp"
+          fi
+          # and so does the copy header, which is .inline.hpp before 17.
+          if [ -f "$ARM_SRC/copy_linux_arm.inline.hpp" ] && [ -f "$PORT_DST/copy_windows_arm.hpp" ]; then
+            mv "$PORT_DST/copy_windows_arm.hpp" "$PORT_DST/copy_windows_arm.inline.hpp"
+          fi
+          log "windows_arm port: $(ls -1 "$PORT_DST" | wc -l) files for this release"
           # os::fetch_bcp_from_context arrived in 24. The port carries it, so
           # drop it, and the assert helper only it uses, where os.hpp does not
           # declare it, rather than keeping a second copy of the file.
