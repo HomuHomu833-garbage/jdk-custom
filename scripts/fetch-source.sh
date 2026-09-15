@@ -3169,37 +3169,68 @@ if [ "$JDK_VERSION" = 8 ]; then
     echo "unexpected jdk8 tree: no empty clang PICFLAG to set" >&2; exit 1; }
 fi
 
-# --- jdk8 windows: the build host's path rules are not the target's ---------
-# BASIC_SETUP_PATHS picks the PATH separator, and decides whether to go looking
-# for cygwin or msys, from OPENJDK_TARGET_OS. Cross-compiling to windows from
-# linux it therefore demands a windows shell on the build host and stops:
-#   configure: error: Unknown Windows environment. Neither cygwin nor msys was
-#   detected.
-# Everything inside that branch describes the machine configure is running on,
-# not the machine being built for, so key it on OPENJDK_BUILD_OS instead, which
-# is what 9 and later settled on. Patch the generated script as well as the .m4:
-# only the generated one runs, and it is only regenerated when hg is installed.
+# --- jdk8 windows: target-OS decisions that are really build-OS or toolchain -
+# Both edits are the pattern this port keeps meeting: a choice keyed on the
+# target OS whose real dependency is the machine configure runs on, or the
+# toolchain in use. 8 ships a checked-in generated-configure.sh alongside the
+# .m4 sources, and only the generated one runs (autogen.sh reruns only when hg
+# reports the .m4 dirty, which never happens in this git tree), so patch both.
 if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ]; then
-  python3 - "$SRC/common/autoconf/basics.m4" "$SRC/common/autoconf/generated-configure.sh" <<'PY'
+  AC8="$SRC/common/autoconf"
+  python3 - "$AC8" <<'PY'
 import re, sys
 
-old = re.compile(r'( *)if test "x\$OPENJDK_TARGET_OS" = "xwindows"; then\n( *)PATH_SEP=";"')
-new = re.compile(r'if test "x\$OPENJDK_BUILD_OS" = "xwindows"; then\n *PATH_SEP=";"')
+ac = sys.argv[1]
 
-for p in sys.argv[1:]:
-    s = open(p, encoding='utf-8', errors='surrogateescape').read()
-    if len(new.findall(s)) == 1:
-        print(f"{p}: PATH_SEP already keyed on the build OS")
-        continue
-    s, n = old.subn(
-        lambda m: f'{m.group(1)}if test "x$OPENJDK_BUILD_OS" = "xwindows"; then'
-                  f'\n{m.group(2)}PATH_SEP=";"', s)
-    if n != 1:
-        sys.exit(f"{p}: the PATH_SEP windows test matched {n} times, expected 1")
-    open(p, 'w', encoding='utf-8', errors='surrogateescape', newline='').write(s)
-    print(f"{p}: PATH_SEP windows test re-keyed on the build OS")
+# BASIC_SETUP_PATHS picks the PATH separator and goes looking for cygwin or msys
+# based on the target OS, so cross-compiling to windows from linux it demands a
+# windows shell on the build host and stops:
+#   configure: error: Unknown Windows environment. Neither cygwin nor msys was
+#   detected.
+# Everything in that branch describes the machine configure runs on, so key it
+# on OPENJDK_BUILD_OS, which is what 9 and later settled on.
+path_sep = (
+    ["basics.m4", "generated-configure.sh"],
+    re.compile(r'( *)if test "x\$OPENJDK_TARGET_OS" = "xwindows"; then\n( *)PATH_SEP=";"'),
+    re.compile(r'if test "x\$OPENJDK_BUILD_OS" = "xwindows"; then\n *PATH_SEP=";"'),
+    lambda m: (f'{m.group(1)}if test "x$OPENJDK_BUILD_OS" = "xwindows"; then'
+               f'\n{m.group(2)}PATH_SEP=";"'),
+    "the PATH separator and windows-shell hunt",
+)
+
+# LIB_SETUP_ON_WINDOWS hunts for the Visual Studio runtime DLLs to bundle into
+# the image on any windows target, though they are a microsoft-toolchain
+# artifact. MSVCR_NAME is only set by the VS detection that never ran, so the
+# name comes out blank:
+#   configure: error: Could not find . Please specify using --with-msvcr-dll.
+# mingw links the system msvcrt and carries its own runtime, which -static folds
+# in, so there is nothing to find or ship.
+msvcr = (
+    ["libraries.m4", "generated-configure.sh"],
+    re.compile(r'if test "x\$OPENJDK_TARGET_OS" = "xwindows"; then'
+               r'(\n\s*TOOLCHAIN_SETUP_VS_RUNTIME_DLLS'
+               r'|\n+# Check whether --with-msvcr-dll was given\.)'),
+    re.compile(r'if test "x\$OPENJDK_TARGET_OS" = "xwindows" && '
+               r'test "x\$TOOLCHAIN_TYPE" = "xmicrosoft"; then'),
+    lambda m: ('if test "x$OPENJDK_TARGET_OS" = "xwindows" && '
+               'test "x$TOOLCHAIN_TYPE" = "xmicrosoft"; then' + m.group(1)),
+    "the Visual Studio runtime DLL lookup",
+)
+
+for files, old, done, repl, what in (path_sep, msvcr):
+    for name in files:
+        p = f"{ac}/{name}"
+        s = open(p, encoding='utf-8', errors='surrogateescape').read()
+        if done.search(s):
+            print(f"{name}: {what} already fixed")
+            continue
+        s, n = old.subn(repl, s)
+        if n != 1:
+            sys.exit(f"{name}: {what} matched {n} times, expected 1")
+        open(p, 'w', encoding='utf-8', errors='surrogateescape', newline='').write(s)
+        print(f"{name}: fixed {what}")
 PY
-  # autogen.sh reruns only when hg reports the .m4 dirty, which never happens in
-  # this git tree, but keep the timestamps consistent with that check anyway.
-  touch "$SRC/common/autoconf/generated-configure.sh"
+  # Keep the generated script newer than the .m4 it came from, so the staleness
+  # check in configure stays quiet on a host that does have hg.
+  touch "$AC8/generated-configure.sh"
 fi
