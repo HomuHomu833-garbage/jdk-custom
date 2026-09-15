@@ -243,7 +243,7 @@ if [ "${PLATFORM:-}" = windows ]; then
           # copy keeps the method names and specializations the release expects:
           # 17 spells the adds add_and_fetch and has no AddUsingCmpxchg, 21 renamed
           # them and added it, and 11 passes the value before the destination.
-          python3 - "$ARM_SRC/atomic_linux_arm.hpp" \n                   "$PORT_DST/atomic_windows_arm.hpp" <<'PYEOF'
+          python3 - "$ARM_SRC/atomic_linux_arm.hpp" "$PORT_DST/atomic_windows_arm.hpp" <<'PYEOF'
 import io, sys
 
 src, dst = sys.argv[1], sys.argv[2]
