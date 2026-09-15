@@ -355,6 +355,29 @@ fix_jdk_pack_mkdir() {
     fi
 }
 
+# --- AccessBridgeStatusWindow's .RC spelling -------------------------------
+# Takes the file's base path and the makefile root, which differ between the
+# modern layout and 8's forest.
+fix_accessbridge_rc_case() {
+    ABRC="$1"
+    ABMK="$2"
+    # AccessBridgeStatusWindow is spelled .RC on disk, .rc by the three library
+    # makefiles and .RC again by the launcher one, which only resolves on a
+    # case-insensitive filesystem:
+    #   No rule to make target '.../common/AccessBridgeStatusWindow.rc'
+    # Renaming the file alone just moves the failure to the launcher, so settle
+    # every reference on the lowercase name the other two .rc files already use.
+    if [ -f "$ABRC.RC" ] && [ ! -f "$ABRC.rc" ]; then
+      mv "$ABRC.RC" "$ABRC.rc"
+      grep -rl 'AccessBridgeStatusWindow\.RC' --include='*.gmk' "$ABMK" 2>/dev/null \
+        | xargs -r sed -i 's/AccessBridgeStatusWindow\.RC/AccessBridgeStatusWindow.rc/g'
+      if grep -rq 'AccessBridgeStatusWindow\.RC' --include='*.gmk' "$ABMK" 2>/dev/null; then
+        echo "failed to settle AccessBridgeStatusWindow on one spelling" >&2; exit 1
+      fi
+      log "Renamed AccessBridgeStatusWindow.RC and its makefile references"
+    fi
+}
+
 # --- windows: source fixes ---------------------------------------------------
 # Everything the llvm-mingw cross build needs changed in the tree. Kept at the
 # indentation it had in build.sh's platform case: five heredocs below would
@@ -1972,22 +1995,8 @@ PYEOF
 
     fix_jdk_pack_mkdir "$SRC/src/jdk.pack/share/native/common-unpack/defines.h"
 
-    # AccessBridgeStatusWindow is spelled .RC on disk, .rc by the three library
-    # makefiles and .RC again by the launcher one, which only resolves on a
-    # case-insensitive filesystem:
-    #   No rule to make target '.../common/AccessBridgeStatusWindow.rc'
-    # Renaming the file alone just moves the failure to the launcher, so settle
-    # every reference on the lowercase name the other two .rc files already use.
-    ABRC="$SRC/src/jdk.accessibility/windows/native/common/AccessBridgeStatusWindow"
-    if [ -f "$ABRC.RC" ] && [ ! -f "$ABRC.rc" ]; then
-      mv "$ABRC.RC" "$ABRC.rc"
-      grep -rl 'AccessBridgeStatusWindow\.RC' --include='*.gmk' "$SRC/make" 2>/dev/null \
-        | xargs -r sed -i 's/AccessBridgeStatusWindow\.RC/AccessBridgeStatusWindow.rc/g'
-      if grep -rq 'AccessBridgeStatusWindow\.RC' --include='*.gmk' "$SRC/make" 2>/dev/null; then
-        echo "failed to settle AccessBridgeStatusWindow on one spelling" >&2; exit 1
-      fi
-      log "Renamed AccessBridgeStatusWindow.RC and its makefile references"
-    fi
+    fix_accessbridge_rc_case \
+      "$SRC/src/jdk.accessibility/windows/native/common/AccessBridgeStatusWindow" "$SRC/make"
 
     # mlib_sys.c picks its aligned allocator with #if defined(_MSC_VER), and
     # everything else gets the unix branch:
@@ -3363,6 +3372,11 @@ if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ] && [ "${TARGET%%-*}" 
     "$SRC/hotspot/src/os/windows/vm" || {
       echo "no bare _MSC_VER version tests found in hotspot's windows sources" >&2; exit 1; }
   [ "$msc_fixed" -gt 0 ] && log "Guarding $msc_fixed windows source files against an undefined _MSC_VER"
+
+  # Same .RC-on-disk, .rc-in-the-makefile mismatch as the modern releases, and
+  # all four of 8's references are already lowercase, so only the file moves.
+  fix_accessbridge_rc_case \
+    "$SRC/jdk/src/windows/native/sun/bridge/AccessBridgeStatusWindow" "$SRC/jdk/make"
 
   # 8 keeps jdk.pack under the old source layout, but the header is the same.
   fix_jdk_pack_mkdir "$SRC/jdk/src/share/native/com/sun/java/util/jar/pack/defines.h"
