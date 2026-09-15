@@ -3338,6 +3338,9 @@ hsl = sys.argv[1]
 # src/os/<os>/vm and the TARGET_OS_FAMILY_<os> define, os_arch picks
 # src/os_cpu/<os>_<cpu>/vm, and sysdefs is what the shared code tests for.
 # _WINDOWS is the one the sources actually spell; mingw supplies WIN32/_WIN64.
+# _JNI_IMPLEMENTATION_ is what the nmake build passes so jni.h exports rather
+# than imports; without it JNIEXPORT is dllimport and every JNI entry point in
+# jni.cpp is "dllimport cannot be applied to non-inline function definition".
 platform = """os_family = windows
 
 arch = x86
@@ -3352,7 +3355,7 @@ lib_arch = amd64
 
 compiler = gcc
 
-sysdefs = -DWINDOWS -D_WINDOWS -DAMD64
+sysdefs = -DWINDOWS -D_WINDOWS -DAMD64 -D_JNI_IMPLEMENTATION_
 """
 
 edits = [
