@@ -3252,3 +3252,105 @@ PY
   # check in configure stays quiet on a host that does have hg.
   touch "$AC8/generated-configure.sh"
 fi
+
+# --- jdk8 windows: a GNU-make hotspot build for the windows sources ---------
+# hotspot 8 builds for windows only through make/windows, which is nmake driven
+# by build.bat and needs Visual Studio. Its GNU-make build lives under
+# make/linux and is generic apart from a handful of linux assumptions, so this
+# points that machinery at the windows sources instead of writing a second
+# build system. OSNAME stays linux (it comes from uname on the build host, and
+# it is what selects the makefiles); only the platform file, which is what
+# selects sources and target defines, becomes windows.
+# 8's hotspot has os_cpu/windows_x86 and nothing else: no cpu/arm at all, and
+# no windows_aarch64. x86_64 is the only triple this can serve.
+if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ] && [ "${TARGET%%-*}" = x86_64 ]; then
+  HSL="$SRC/hotspot/make/linux"
+  python3 - "$HSL" <<'PY'
+import re, sys
+
+hsl = sys.argv[1]
+
+# The platform file is the whole of hotspot's port selection: os_family picks
+# src/os/<os>/vm and the TARGET_OS_FAMILY_<os> define, os_arch picks
+# src/os_cpu/<os>_<cpu>/vm, and sysdefs is what the shared code tests for.
+# _WINDOWS is the one the sources actually spell; mingw supplies WIN32/_WIN64.
+platform = """os_family = windows
+
+arch = x86
+
+arch_model = x86_64
+
+os_arch = windows_x86
+
+os_arch_model = windows_x86_64
+
+lib_arch = amd64
+
+compiler = gcc
+
+sysdefs = -DWINDOWS -D_WINDOWS -DAMD64
+"""
+
+edits = [
+    # vm.make derives the makefiles directory from os_family, which would now
+    # send it into the nmake tree. The build machinery stays the linux one.
+    ("makefiles/vm.make",
+     "MAKEFILES_DIR=$(GAMMADIR)/make/$(Platform_os_family)/makefiles",
+     "MAKEFILES_DIR=$(GAMMADIR)/make/linux/makefiles",
+     "the makefiles directory"),
+    ("makefiles/top.make",
+     "$(GAMMADIR)/make/$(Platform_os_family)/makefiles/adjust-mflags.sh",
+     "$(GAMMADIR)/make/linux/makefiles/adjust-mflags.sh",
+     "the adjust-mflags path"),
+    # os/posix is added unconditionally, being true of every OS the GNU-make
+    # build served. windows is the exception.
+    ("makefiles/vm.make",
+     "SOURCE_PATHS+=$(HS_COMMON_SRC)/os/posix/vm\n",
+     "",
+     "the posix source path"),
+    # The unix runtime libraries, replaced by what os/windows/vm calls into.
+    ("makefiles/vm.make",
+     "LIBS += -lm -ldl -lpthread",
+     "LIBS += -lkernel32 -ladvapi32 -luser32 -lws2_32 -lpsapi -lversion -lwinmm",
+     "the runtime libraries"),
+    ("makefiles/vm.make",
+     "LIBJVM   = lib$(JVM).so",
+     "LIBJVM   = $(JVM).dll",
+     "the VM library name"),
+    # ELF-only link options: a non-executable stack segment, the symbol version
+    # script, and the soname. PE has no equivalent of any of the three.
+    ("makefiles/vm.make",
+     "LFLAGS += -Xlinker -z -Xlinker noexecstack\n",
+     "LDNOMAP = true\n",
+     "the ELF stack marking"),
+    ("makefiles/gcc.make",
+     "SONAMEFLAG = -Xlinker -soname=SONAME",
+     "SONAMEFLAG =",
+     "the soname flag"),
+    # Every PE image is relocatable and clang rejects -fPIC for the target.
+    ("makefiles/gcc.make",
+     "PICFLAG = -fPIC",
+     "PICFLAG =",
+     "the PIC flag"),
+]
+
+p = f"{hsl}/platform_amd64"
+if open(p, encoding='utf-8').read() == platform:
+    print("platform file: already the windows port")
+else:
+    open(p, 'w', encoding='utf-8', newline='').write(platform)
+    print("platform file: pointed at the windows sources")
+
+for name, old, new, what in edits:
+    f = f"{hsl}/{name}"
+    s = open(f, encoding='utf-8', errors='surrogateescape').read()
+    if s.count(old) == 0 and (new == "" or s.count(new) >= 1):
+        print(f"{name}: {what} already fixed")
+        continue
+    if s.count(old) != 1:
+        sys.exit(f"{name}: {what} matched {s.count(old)} times, expected 1")
+    open(f, 'w', encoding='utf-8', errors='surrogateescape', newline='').write(
+        s.replace(old, new))
+    print(f"{name}: fixed {what}")
+PY
+fi
