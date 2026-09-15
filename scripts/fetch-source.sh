@@ -3217,7 +3217,25 @@ msvcr = (
     "the Visual Studio runtime DLL lookup",
 )
 
-for files, old, done, repl, what in (path_sep, msvcr):
+# spec.gmk.in replaces PATH wholesale with the Visual Studio tools directory on
+# any windows target, as its own comment says it does for the VS toolchain. With
+# clang that substitution is empty, so make runs with no PATH at all and the
+# first recipe dies:
+#   /bin/sh: 1: git: not found
+#   logger.sh: line 40: mktemp: No such file or directory
+# TOOLCHAIN_TYPE is not assigned until much further down the file, so test the
+# substitution itself rather than the make variable.
+vs_path = (
+    ["spec.gmk.in"],
+    re.compile(r'ifeq \(\$\(OPENJDK_TARGET_OS\), windows\)\n'
+               r'(  # On Windows, the Visual Studio toolchain needs)'),
+    re.compile(r'ifeq \(\$\(OPENJDK_TARGET_OS\)-@TOOLCHAIN_TYPE@, windows-microsoft\)'),
+    lambda m: ('ifeq ($(OPENJDK_TARGET_OS)-@TOOLCHAIN_TYPE@, windows-microsoft)\n'
+               + m.group(1)),
+    "the wholesale PATH replacement",
+)
+
+for files, old, done, repl, what in (path_sep, msvcr, vs_path):
     for name in files:
         p = f"{ac}/{name}"
         s = open(p, encoding='utf-8', errors='surrogateescape').read()
