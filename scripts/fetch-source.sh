@@ -353,6 +353,16 @@ PYEOF
             out=$(echo "$b" | sed 's/windows_aarch64/windows_arm/')
             sed -e 's/WINDOWS_AARCH64/WINDOWS_ARM/g' -e 's/windows_aarch64/windows_arm/g'                 "$A64_SRC/$b" > "$PORT_DST/$out"
           done
+          # JavaThread moved out of runtime/thread.hpp into runtime/javaThread.hpp
+          # in 21, and the port's own sources include the newer name.
+          if [ ! -f "$SRC/src/hotspot/share/runtime/javaThread.hpp" ]; then
+            sed -i 's|#include "runtime/javaThread.hpp"|#include "runtime/thread.hpp"|'                 "$PORT_DST"/*.cpp
+            if grep -rq 'runtime/javaThread.hpp' "$PORT_DST"; then
+              echo "port still includes runtime/javaThread.hpp, which this release lacks" >&2; exit 1
+            fi
+            log "Including runtime/thread.hpp, which is where JavaThread lives here"
+          fi
+
           # The port's own javaThread body follows the release's spelling.
           if [ -f "$ARM_SRC/thread_linux_arm.cpp" ] && [ -f "$PORT_DST/javaThread_windows_arm.cpp" ]; then
             mv "$PORT_DST/javaThread_windows_arm.cpp" "$PORT_DST/thread_windows_arm.cpp"
