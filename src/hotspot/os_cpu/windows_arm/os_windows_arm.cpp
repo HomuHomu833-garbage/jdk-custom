@@ -83,6 +83,10 @@
 #define REG_BCP R7
 #define REG_FP  R11
 
+// 11 wraps the pc in an ExtendedPC, passes a Thread* rather than a JavaThread*
+// to the call wrapper, and has no PRAGMA_DISABLE_MSVC_WARNING. Both shapes are
+// here and fetch-source.sh keeps the one this release uses.
+// BEGIN prologue, address pc
 void os::os_exception_wrapper(java_call_t f, JavaValue* value, const methodHandle& method, JavaCallArguments* args, JavaThread* thread) {
   f(value, method, args, thread);
 }
@@ -121,6 +125,46 @@ frame os::fetch_frame_from_context(const void* ucVoid) {
   address epc = fetch_frame_from_context(ucVoid, &sp, &fp);
   return frame(sp, fp, epc);
 }
+// END prologue, address pc
+// BEGIN prologue, ExtendedPC
+void os::os_exception_wrapper(java_call_t f, JavaValue* value, const methodHandle& method, JavaCallArguments* args, Thread* thread) {
+  f(value, method, args, thread);
+}
+
+// Returns an estimate of the current stack pointer. Result must be guaranteed
+// to point into the calling threads stack, and be no lower than the current
+// stack pointer.
+address os::current_stack_pointer() {
+  int dummy;
+  address sp = (address)&dummy;
+  return sp;
+}
+
+ExtendedPC os::fetch_frame_from_context(const void* ucVoid,
+                    intptr_t** ret_sp, intptr_t** ret_fp) {
+  ExtendedPC  epc;
+  CONTEXT* uc = (CONTEXT*)ucVoid;
+
+  if (uc != NULL) {
+    epc = ExtendedPC((address)uc->Pc);
+    if (ret_sp) *ret_sp = (intptr_t*)uc->Sp;
+    if (ret_fp) *ret_fp = (intptr_t*)uc->REG_FP;
+  } else {
+    // construct empty ExtendedPC for return value checking
+    epc = ExtendedPC(NULL);
+    if (ret_sp) *ret_sp = (intptr_t *)NULL;
+    if (ret_fp) *ret_fp = (intptr_t *)NULL;
+  }
+  return epc;
+}
+
+frame os::fetch_frame_from_context(const void* ucVoid) {
+  intptr_t* sp;
+  intptr_t* fp;
+  ExtendedPC epc = fetch_frame_from_context(ucVoid, &sp, &fp);
+  return frame(sp, fp, epc.pc());
+}
+// END prologue, ExtendedPC
 
 #ifdef ASSERT
 static bool is_interpreter(const CONTEXT* uc) {

@@ -383,6 +383,29 @@ PYEOF
             log "Leaving print_tos_pc out, which this release defines elsewhere"
           fi
 
+          # 11 wraps the pc in an ExtendedPC, hands the call wrapper a Thread*
+          # rather than a JavaThread*, and has no PRAGMA_DISABLE_MSVC_WARNING.
+          # Keep whichever prologue this release's own windows_aarch64 uses.
+          if grep -q 'ExtendedPC os::fetch_frame_from_context' "$A64_SRC/os_windows_aarch64.cpp"; then
+            pro_begin='// BEGIN prologue, address pc'
+            pro_end='// END prologue, address pc'
+          else
+            pro_begin='// BEGIN prologue, ExtendedPC'
+            pro_end='// END prologue, ExtendedPC'
+          fi
+          python3 - "$PORT_DST/os_windows_arm.cpp" "$pro_begin" "$pro_end" <<'PYEOF'
+import io, sys
+p, b, e = sys.argv[1], sys.argv[2], sys.argv[3]
+s = io.open(p, encoding='utf-8', newline='').read()
+start = s.index(b)
+end = s.index(e) + len(e) + 1
+io.open(p, 'w', encoding='utf-8', newline='').write(s[:start] + s[end:])
+PYEOF
+          if [ "$(grep -c 'os::os_exception_wrapper' "$PORT_DST/os_windows_arm.cpp")" != 1 ]; then
+            echo "expected exactly one prologue after trimming" >&2; exit 1
+          fi
+          log "Keeping the prologue this release uses"
+
           # print_register_info gained a continuation index in 21 so the error
           # handler can print registers in bounded chunks. The port carries both
           # shapes; keep the one this release declares.
@@ -627,6 +650,11 @@ sub("defined(AMD64) || defined(_M_ARM64)\n"
 sub("#ifndef _WIN64\n",
     "#if !defined(_WIN64) && !defined(_M_ARM)\n",
     "32-bit windows blocks", want="optional")
+
+# 11 spells one of them with two spaces, and it guards x87 control word asm
+sub("#ifndef  _WIN64\n",
+    "#if !defined(_WIN64) && !defined(_M_ARM)\n",
+    "32-bit windows blocks, double space", want="optional")
 
 if s == orig:
     raise SystemExit("os_windows.cpp: nothing changed")
