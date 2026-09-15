@@ -188,7 +188,14 @@ apply_set "$PATCHES_DIR/global/jdk/$JDK_VERSION" strict
 # Everything the llvm-mingw cross build needs changed in the tree. Kept at the
 # indentation it had in build.sh's platform case: five heredocs below would
 # break if these lines were re-indented.
-if [ "${PLATFORM:-}" = windows ]; then
+# Everything below was written against the modern source layout, where hotspot
+# lives at src/hotspot and the JDK at src/java.*. 8 predates that: it is still
+# the multi-repo forest, hotspot/ and jdk/ and corba/ beside each other, with a
+# build system to match. Not one of these edits finds its file there, and the
+# handful whose makefiles happen to share a path find a different file inside.
+# A windows port for 8 is its own piece of work; until it exists, let 8 reach
+# its own errors rather than stopping inside guards written for another tree.
+if [ "${PLATFORM:-}" = windows ] && [ "${JDK_VERSION}" != 8 ]; then
     # Upstream has no windows port for 32-bit ARM: hotspot builds os_cpu from
     # <os>_<cpu>, and only windows_x86 and windows_aarch64 exist, so the VM stops
     # at "globals_windows_arm.hpp file not found". The port lives in this repo
