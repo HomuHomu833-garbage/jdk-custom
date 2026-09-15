@@ -237,6 +237,115 @@ if [ "${PLATFORM:-}" = windows ]; then
             out=$(echo "$b" | sed 's/linux_arm/windows_arm/')
             sed -e 's/LINUX_ARM/WINDOWS_ARM/g' -e 's/linux_arm/windows_arm/g' "$f" > "$PORT_DST/$out"
           done
+          # The atomics are this release's own file with the kernel helper calls
+          # replaced: windows has no helper page at 0xffff0fxx and no pre-v7 CPU,
+          # so each one becomes a compiler builtin. Deriving rather than carrying a
+          # copy keeps the method names and specializations the release expects:
+          # 17 spells the adds add_and_fetch and has no AddUsingCmpxchg, 21 renamed
+          # them and added it, and 11 passes the value before the destination.
+          python3 - "$ARM_SRC/atomic_linux_arm.hpp" \n                   "$PORT_DST/atomic_windows_arm.hpp" <<'PYEOF'
+import io, sys
+
+src, dst = sys.argv[1], sys.argv[2]
+s = io.open(src, encoding='utf-8', newline='').read()
+s = s.replace('LINUX_ARM', 'WINDOWS_ARM').replace('linux_arm', 'windows_arm')
+
+# The kernel user helper page at 0xffff0fxx does not exist on windows, and no
+# windows ARM CPU predates v7, so every read-modify-write goes to the compiler
+# builtin, which lowers to ldrex/strex plus dmb. Everything else about the file,
+# the method names and which specializations exist, is left exactly as this
+# release wrote it: 17 spells the adds add_and_fetch and has no
+# AddUsingCmpxchg, 21 renamed them and added it.
+CAS_HELPER = '''
+// windows has no kernel helper page to call, so compare-and-swap goes straight
+// to the builtin. It reports the value it saw through its expected argument,
+// and hotspot wants that value whether or not the swap happened.
+template<typename T>
+inline T hs_windows_arm_cas(T volatile* dest, T compare_value, T exchange_value) {
+  T expected = compare_value;
+  __atomic_compare_exchange_n(dest, &expected, exchange_value,
+                              /*weak*/ false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  return expected;
+}
+
+'''
+
+def alt(cands, label, required=True):
+    global s
+    for old, new in cands:
+        if s.count(old) == 1:
+            s = s.replace(old, new, 1)
+            return
+    if required:
+        raise SystemExit("atomic_windows_arm.hpp: %s matched no known form" % label)
+
+# 17 reaches the helpers as os::atomic_*_func; 21 moved them to ARMAtomicFuncs.
+alt([("(*os::atomic_load_long_func)(reinterpret_cast<const volatile int64_t*>(src))",
+      "__atomic_load_n(reinterpret_cast<const volatile int64_t*>(src), __ATOMIC_SEQ_CST)"),
+     ("(*ARMAtomicFuncs::_load_long_func)(reinterpret_cast<const volatile int64_t*>(src))",
+      "__atomic_load_n(reinterpret_cast<const volatile int64_t*>(src), __ATOMIC_SEQ_CST)")],
+    "64-bit load")
+
+alt([("(*os::atomic_store_long_func)(\n"
+      "    PrimitiveConversions::cast<int64_t>(store_value), reinterpret_cast<volatile int64_t*>(dest));",
+      "__atomic_store_n(reinterpret_cast<volatile int64_t*>(dest),\n"
+      "                   PrimitiveConversions::cast<int64_t>(store_value), __ATOMIC_SEQ_CST);"),
+     ("(*ARMAtomicFuncs::_store_long_func)(\n"
+      "    PrimitiveConversions::cast<int64_t>(store_value), reinterpret_cast<volatile int64_t*>(dest));",
+      "__atomic_store_n(reinterpret_cast<volatile int64_t*>(dest),\n"
+      "                   PrimitiveConversions::cast<int64_t>(store_value), __ATOMIC_SEQ_CST);")],
+    "64-bit store")
+
+alt([("add_using_helper<int32_t>(os::atomic_add_func, dest, add_value)",
+      "__atomic_add_fetch(dest, add_value, __ATOMIC_SEQ_CST)"),
+     ("add_using_helper<int32_t>(ARMAtomicFuncs::_add_func, dest, add_value)",
+      "__atomic_add_fetch(dest, add_value, __ATOMIC_SEQ_CST)"),
+     ("add_using_helper<int32_t>(os::atomic_add_func, add_value, dest)",
+      "__atomic_add_fetch(dest, add_value, __ATOMIC_SEQ_CST)")],
+    "32-bit add")
+
+alt([("xchg_using_helper<int32_t>(os::atomic_xchg_func, dest, exchange_value)",
+      "__atomic_exchange_n(dest, exchange_value, __ATOMIC_SEQ_CST)"),
+     ("xchg_using_helper<int32_t>(ARMAtomicFuncs::_xchg_func, dest, exchange_value)",
+      "__atomic_exchange_n(dest, exchange_value, __ATOMIC_SEQ_CST)"),
+     ("xchg_using_helper<int32_t>(os::atomic_xchg_func, exchange_value, dest)",
+      "__atomic_exchange_n(dest, exchange_value, __ATOMIC_SEQ_CST)")],
+    "32-bit exchange")
+
+alt([("cmpxchg_using_helper<int32_t>(reorder_cmpxchg_func, dest, compare_value, exchange_value)",
+      "hs_windows_arm_cas(dest, compare_value, exchange_value)"),
+     ("cmpxchg_using_helper<int32_t>(reorder_cmpxchg_func, exchange_value, dest, compare_value)",
+      "hs_windows_arm_cas(dest, compare_value, exchange_value)")],
+    "32-bit compare-and-swap")
+
+alt([("cmpxchg_using_helper<int64_t>(reorder_cmpxchg_long_func, dest, compare_value, exchange_value)",
+      "hs_windows_arm_cas(dest, compare_value, exchange_value)"),
+     ("cmpxchg_using_helper<int64_t>(reorder_cmpxchg_long_func, exchange_value, dest, compare_value)",
+      "hs_windows_arm_cas(dest, compare_value, exchange_value)")],
+    "64-bit compare-and-swap")
+
+# the two reorder wrappers only existed to swap arguments for the kernel call
+for name in ('reorder_cmpxchg_func', 'reorder_cmpxchg_long_func'):
+    start = s.find('inline int' + ('64_t ' if 'long' in name else '32_t ') + name)
+    if start == -1:
+        continue
+    end = s.index('\n}\n', start) + len('\n}\n')
+    s = s[:start] + s[end:]
+
+anchor = 'template<>\ntemplate<typename T>\ninline T Atomic::PlatformLoad<8>'
+if s.count(anchor) != 1:
+    raise SystemExit("atomic_windows_arm.hpp: cannot place the cas helper")
+s = s.replace(anchor, CAS_HELPER + anchor, 1)
+
+# only a surviving helper *call* matters; the ARMAtomicFuncs declaration itself
+# is unused and harmless
+for leftover in ('cmpxchg_using_helper', 'add_using_helper', 'xchg_using_helper'):
+    if leftover in s:
+        raise SystemExit("atomic_windows_arm.hpp: %s survived" % leftover)
+
+io.open(dst, 'w', encoding='utf-8', newline='').write(s)
+PYEOF
+
           # vmStructs, the inline os header and the byte swaps are OS-shaped
           # rather than CPU-shaped, so they come from the windows port instead.
           for b in vmStructs_windows_aarch64.hpp os_windows_aarch64.inline.hpp                    bytes_windows_aarch64.hpp bytes_windows_aarch64.inline.hpp; do
