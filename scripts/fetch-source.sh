@@ -1705,7 +1705,10 @@ PYEOF
         exit 1; }
       log "Linking libraries with C++ sources using the C++ linker"
     fi
-    if [ -f "$NCG" ] && ! grep -q 'INFERRED_LINK_TYPE' "$NCG"; then
+    # The other spelling, for the releases that call SetupSourceFiles. 8 has
+    # neither anchor, so it takes neither branch.
+    if [ -f "$NCG" ] && ! grep -q 'INFERRED_LINK_TYPE' "$NCG" \
+       && grep -qF '$$(eval $$(call SetupSourceFiles,$1))' "$NCG"; then
       awk '
         { print }
         !done && $0 == "  $$(eval $$(call SetupSourceFiles,$1))" {
