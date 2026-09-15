@@ -3354,6 +3354,20 @@ if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ] && [ "${TARGET%%-*}" 
       echo "no bare _MSC_VER version tests found in hotspot's windows sources" >&2; exit 1; }
   [ "$msc_fixed" -gt 0 ] && log "Guarding $msc_fixed windows source files against an undefined _MSC_VER"
 
+  # Throwable.c declares fillInStackTrace's third parameter as int, while the
+  # generated header says jint. On unix those are the same type; the windows
+  # jni_md.h makes jint a long, so C sees two different functions:
+  #   Throwable.c:47: error: conflicting types for
+  #   'Java_java_lang_Throwable_fillInStackTrace'
+  # Later releases spell it jint, which is what the header always said.
+  THR="$SRC/jdk/src/share/native/java/lang/Throwable.c"
+  if grep -q 'jobject throwable, int dummy' "$THR"; then
+    sed -i 's/jobject throwable, int dummy/jobject throwable, jint dummy/' "$THR"
+    grep -q 'jobject throwable, jint dummy' "$THR" || {
+      echo "failed to widen fillInStackTrace's dummy parameter to jint" >&2; exit 1; }
+    log "Declaring fillInStackTrace's dummy parameter jint, as its header does"
+  fi
+
   # hotspot's windows sources lean on what <windows.h> pulls in by default, and
   # this build passes WIN32_LEAN_AND_MEAN, which is exactly what suppresses the
   # extra headers. Two groups are missing: winsock, for the LPWSADATA in
