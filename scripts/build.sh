@@ -598,6 +598,10 @@ if [ "$JDK_VERSION" = 8 ]; then
   #     bundled-lib toggles are not), and without it configure hunts for a
   #     system freetype.
   #   --enable-unlimited-crypto  the JCE policy 11+ ships by default.
+  #   --with-toolchain-type=clang  8 picks its default from the *build* OS, so
+  #     on this linux host it would choose gcc and then reject llvm-mingw for
+  #     not being one ("A gcc compiler is required"). Every toolchain here is
+  #     clang, so say so. Redundant on android, which already passes it.
   #   BUILD_CC/BUILD_CXX  hotspot-spec.gmk.in maps BUILD_CXX onto HOSTCXX, which
   #     builds adlc, and hotspot hands that host tool the *target* compiler's
   #     flags; with the NDK clang as CXX it adds -flimit-debug-info and host g++
@@ -618,6 +622,7 @@ if [ "$JDK_VERSION" = 8 ]; then
     --disable-debug-symbols \
     --with-freetype=bundled \
     --enable-unlimited-crypto \
+    --with-toolchain-type=clang \
     BUILD_CC=clang \
     BUILD_CXX=clang++ \
     "${conf8_headful[@]}" \
