@@ -353,6 +353,21 @@ PYEOF
             out=$(echo "$b" | sed 's/windows_aarch64/windows_arm/')
             sed -e 's/WINDOWS_AARCH64/WINDOWS_ARM/g' -e 's/windows_aarch64/windows_arm/g'                 "$A64_SRC/$b" > "$PORT_DST/$out"
           done
+          # print_tos_pc is per-os_cpu in 17, shared windows code in 21 and 25,
+          # and absent in 11. Keep the port's copy only where this release's own
+          # windows_aarch64 carries one.
+          if ! grep -q 'void os::print_tos_pc' "$A64_SRC/os_windows_aarch64.cpp"; then
+            python3 - "$PORT_DST/os_windows_arm.cpp" "// BEGIN print_tos_pc" "// END print_tos_pc" <<'PYEOF'
+import io, sys
+p, b, e = sys.argv[1], sys.argv[2], sys.argv[3]
+s = io.open(p, encoding='utf-8', newline='').read()
+start = s.index(b)
+end = s.index(e) + len(e) + 1
+io.open(p, 'w', encoding='utf-8', newline='').write(s[:start] + s[end:])
+PYEOF
+            log "Leaving print_tos_pc out, which this release defines elsewhere"
+          fi
+
           # print_register_info gained a continuation index in 21 so the error
           # handler can print registers in bounded chunks. The port carries both
           # shapes; keep the one this release declares.

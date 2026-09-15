@@ -240,6 +240,29 @@ void os::print_context(outputStream *st, const void *context) {
   st->cr();
 }
 
+// 17 expects each os_cpu to dump the stack top and the code around the pc;
+// 21 moved that into the shared windows file, and 11 has no such function at
+// all. fetch-source.sh keeps this only where the release's own windows_aarch64
+// defines its own.
+// BEGIN print_tos_pc
+void os::print_tos_pc(outputStream *st, const void *context) {
+  if (context == nullptr) return;
+
+  const CONTEXT* uc = (const CONTEXT*)context;
+
+  address sp = (address)uc->Sp;
+  print_tos(st, sp);
+  st->cr();
+
+  // Note: it may be unsafe to inspect memory near pc. For example, pc may
+  // point to garbage if entry point in an nmethod is corrupted. Leave
+  // this at the end, and hope for the best.
+  address pc = (address)uc->Pc;
+  st->print_cr("Instructions: (pc=" PTR_FORMAT ")", pc);
+  print_hex_dump(st, pc - 32, pc + 32, sizeof(char));
+}
+// END print_tos_pc
+
 // print_register_info gained a continuation index in 21, so the error handler
 // can print the registers in bounded chunks; before that it took two arguments
 // and printed them all at once. Both are here and fetch-source.sh keeps the one
