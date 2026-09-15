@@ -226,6 +226,10 @@ if [ "${PLATFORM:-}" = windows ]; then
               vm_version_linux_arm_32.cpp|atomic_linux_arm.hpp) continue ;;
               copy_linux_arm.hpp|copy_linux_arm.inline.hpp) continue ;;
               globals_linux_arm.hpp|vmStructs_linux_arm.hpp) continue ;;
+              # linux_arm swaps bytes with glibc's <byteswap.h>; the windows
+              # copy uses the _byteswap_* intrinsics, and byte order is the
+              # same on both ARM targets, so take that one below
+              bytes_linux_arm.hpp|bytes_linux_arm.inline.hpp) continue ;;
               # only the releases that include OS_CPU_HEADER(os) want this one
               os_linux_arm.hpp)
                 grep -q 'OS_CPU_HEADER(os)' "$SRC/src/hotspot/share/runtime/os.hpp" || continue ;;
@@ -233,9 +237,9 @@ if [ "${PLATFORM:-}" = windows ]; then
             out=$(echo "$b" | sed 's/linux_arm/windows_arm/')
             sed -e 's/LINUX_ARM/WINDOWS_ARM/g' -e 's/linux_arm/windows_arm/g' "$f" > "$PORT_DST/$out"
           done
-          # vmStructs and the inline os header are OS-shaped, not CPU-shaped, so
-          # they come from the windows port instead.
-          for b in vmStructs_windows_aarch64.hpp os_windows_aarch64.inline.hpp; do
+          # vmStructs, the inline os header and the byte swaps are OS-shaped
+          # rather than CPU-shaped, so they come from the windows port instead.
+          for b in vmStructs_windows_aarch64.hpp os_windows_aarch64.inline.hpp                    bytes_windows_aarch64.hpp bytes_windows_aarch64.inline.hpp; do
             [ -f "$A64_SRC/$b" ] || continue
             out=$(echo "$b" | sed 's/windows_aarch64/windows_arm/')
             sed -e 's/WINDOWS_AARCH64/WINDOWS_ARM/g' -e 's/windows_aarch64/windows_arm/g'                 "$A64_SRC/$b" > "$PORT_DST/$out"
