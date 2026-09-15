@@ -392,8 +392,6 @@ PYEOF
           else
             pro_begin='// BEGIN prologue, ExtendedPC'
             pro_end='// END prologue, ExtendedPC'
-            # the javaThread body reads the same call's result
-            sed -i 's|os::fetch_frame_from_context(ucontext, &ret_sp, &ret_fp);|os::fetch_frame_from_context(ucontext, \&ret_sp, \&ret_fp).pc();|'                 "$PORT_DST"/*thread_windows_arm.cpp
           fi
           python3 - "$PORT_DST/os_windows_arm.cpp" "$pro_begin" "$pro_end" <<'PYEOF'
 import io, sys
@@ -444,6 +442,19 @@ PYEOF
           # The port's own javaThread body follows the release's spelling.
           if [ -f "$ARM_SRC/thread_linux_arm.cpp" ] && [ -f "$PORT_DST/javaThread_windows_arm.cpp" ]; then
             mv "$PORT_DST/javaThread_windows_arm.cpp" "$PORT_DST/thread_windows_arm.cpp"
+          fi
+          # pd_get_top_frame reads the same fetch_frame_from_context the prologue
+          # above accounts for, so where that returns an ExtendedPC the caller
+          # needs .pc(). After the rename, so the file is under its final name.
+          if grep -q 'ExtendedPC os::fetch_frame_from_context' "$A64_SRC/os_windows_aarch64.cpp"; then
+            for tf in "$PORT_DST/javaThread_windows_arm.cpp" "$PORT_DST/thread_windows_arm.cpp"; do
+              [ -f "$tf" ] || continue
+              sed -i 's|os::fetch_frame_from_context(ucontext, &ret_sp, &ret_fp);|os::fetch_frame_from_context(ucontext, \&ret_sp, \&ret_fp).pc();|' "$tf"
+              if grep -q 'fetch_frame_from_context(ucontext, &ret_sp, &ret_fp);' "$tf"; then
+                echo "failed to unwrap the ExtendedPC in $tf" >&2; exit 1
+              fi
+            done
+            log "Unwrapping the ExtendedPC the javaThread body reads"
           fi
           # and so does the copy header, which is .inline.hpp before 17.
           if [ -f "$ARM_SRC/copy_linux_arm.inline.hpp" ] && [ -f "$PORT_DST/copy_windows_arm.hpp" ]; then
