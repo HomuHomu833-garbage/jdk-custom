@@ -3248,7 +3248,25 @@ vs_path = (
     "the wholesale PATH replacement",
 )
 
-for files, old, done, repl, what in (path_sep, msvcr, vs_path):
+
+# The gcc/clang branch adds -Wl,-z,relro for every target but macosx, and the
+# generated script covers clang where the .m4 still says gcc only. It lands in
+# LEGACY_TARGET_LDFLAGS, which is hotspot's EXTRA_LDFLAGS, and lld rejects it
+# on a PE target:
+#   lld: error: unknown argument: -z
+# Read-only relocations are an ELF idea; exclude windows the way macosx is.
+relro = (
+    ["flags.m4", "generated-configure.sh"],
+    re.compile(r'if test "x\$OPENJDK_TARGET_OS" != xmacosx; then\n'
+               r'(\s*LDFLAGS_JDK="\$LDFLAGS_JDK -Wl,-z,relro")'),
+    re.compile(r'if test "x\$OPENJDK_TARGET_OS" != xmacosx && '
+               r'test "x\$OPENJDK_TARGET_OS" != xwindows; then'),
+    lambda m: ('if test "x$OPENJDK_TARGET_OS" != xmacosx && '
+               'test "x$OPENJDK_TARGET_OS" != xwindows; then\n' + m.group(1)),
+    "the relro link flag",
+)
+
+for files, old, done, repl, what in (path_sep, msvcr, vs_path, relro):
     for name in files:
         p = f"{ac}/{name}"
         s = open(p, encoding='utf-8', errors='surrogateescape').read()
