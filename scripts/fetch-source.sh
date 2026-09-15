@@ -3447,6 +3447,53 @@ edits = [
      "install: install_jvm install_jsig install_saproc",
      "install: install_jvm",
      "the companion library install"),
+    # More ELF-only link options, which lld rejects outright on a PE target:
+    #   lld: error: unknown argument: --hash-style=both
+    #   lld: error: unknown argument: -z
+    # The link recipe is a brace group joined by semicolons, so it reports the
+    # failure and carries on; the missing jvm.dll only surfaces at export time.
+    ("makefiles/gcc.make",
+     "LFLAGS += $(LDFLAGS_HASH_STYLE)",
+     "# ELF symbol hash tables: nothing to choose on PE.",
+     "the hash-style flag"),
+    ("makefiles/gcc.make",
+     'LDFLAGS_NO_EXEC_STACK="-Wl,-z,noexecstack"',
+     "LDFLAGS_NO_EXEC_STACK=",
+     "the noexecstack flag"),
+    # llvm-mingw carries libc++, not libstdc++, so the explicit -lstdc++ finds
+    # nothing. Link the VM with the C++ driver and let it name its own runtime,
+    # which --with-extra-ldflags=-static then folds into the image.
+    ("makefiles/gcc.make",
+     "STATIC_STDCXX = -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic",
+     "STATIC_STDCXX =",
+     "the static libstdc++"),
+    ("makefiles/vm.make",
+     "LINK_VM = $(LINK_LIB.CC)",
+     "LINK_VM = $(LINK_LIB.CXX)",
+     "the VM link driver"),
+    # The export list is what the JDK side collects, and it is still spelled for
+    # linux: a .so suffix, the lib prefix windows does not use, and libjsig,
+    # which is no longer built.
+    #   No rule to make target '.../jre/lib/amd64/libjsig.so', needed by
+    #   'generic_export'
+    ("makefiles/defs.make",
+     "LIBRARY_SUFFIX=so",
+     "LIBRARY_SUFFIX=dll",
+     "the library suffix"),
+    ("makefiles/defs.make",
+     "EXPORT_LIST += $(EXPORT_JRE_LIB_ARCH_DIR)/libjsig.$(LIBRARY_SUFFIX)\n",
+     "",
+     "the libjsig export"),
+    ("makefiles/defs.make",
+     "libjvm.$(LIBRARY_SUFFIX)",
+     "jvm.$(LIBRARY_SUFFIX)",
+     "the VM library name in the export list", 3),
+    # The serviceability agent's native half is not built either; sa-jdi.jar,
+    # which is pure java and which the images stage does look for, stays.
+    ("makefiles/defs.make",
+     " $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.$(LIBRARY_SUFFIX)",
+     "",
+     "the libsaproc export", 3),
 ]
 
 p = f"{hsl}/platform_amd64"
