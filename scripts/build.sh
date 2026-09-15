@@ -158,7 +158,16 @@ case "$PLATFORM" in
     fi
     if [ -d "$MINGW_INC" ]; then
       rm -rf "$CASE_INC"; mkdir -p "$CASE_INC"
-      grep -rhoE '#[[:space:]]*include[[:space:]]*<[A-Za-z0-9_]+\.h>' "$SRC/src" 2>/dev/null \
+      # Where the sources live depends on the release: 11 and later keep them
+      # under src/, while 8 is still the forest of jdk/ and hotspot/ and the
+      # rest. Scanning a directory that is not there fails the pipeline under
+      # pipefail, and with stderr discarded the build would end without a word.
+      hdr_roots=""
+      for d in "$SRC/src" "$SRC/jdk/src" "$SRC/hotspot/src" "$SRC/corba/src"; do
+        [ -d "$d" ] && hdr_roots="$hdr_roots $d"
+      done
+      # shellcheck disable=SC2086
+      { [ -n "$hdr_roots" ] && grep -rhoE '#[[:space:]]*include[[:space:]]*<[A-Za-z0-9_]+\.h>' $hdr_roots 2>/dev/null || true; } \
         | grep -oE '<[A-Za-z0-9_]+\.h>' | tr -d '<>' | sort -u \
         | while read -r hdr; do
             low=$(printf '%s' "$hdr" | tr '[:upper:]' '[:lower:]')
