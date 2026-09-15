@@ -3279,6 +3279,26 @@ for files, old, done, repl, what in (path_sep, msvcr, vs_path, relro):
         open(p, 'w', encoding='utf-8', errors='surrogateescape', newline='').write(s)
         print(f"{name}: fixed {what}")
 PY
+  # The version-info defines for the resource compiler sit in the microsoft
+  # branch, so a clang build gets an empty RC_FLAGS and the .rc keeps bare
+  # tokens where numbers belong:
+  #   llvm-rc: Error parsing file: expected '-', '~', integer or '(', got JDK_FVER
+  # 17 moved them out of any toolchain test; do the same here, leaving behind
+  # only the cl.exe switches windres rejects. The defines also move from -d to
+  # -D, which rc.exe and windres both accept but llvm-windres needs.
+  for f in "$AC8/flags.m4" "$AC8/generated-configure.sh"; do
+    grep -q 'RC_FLAGS="-nologo -l 0x409 -r"' "$f" || {
+      echo "unexpected $f: no RC_FLAGS block to rescope" >&2; exit 1; }
+    grep -q '^    RC_FLAGS=""$' "$f" && continue
+    perl -0pi -e 's/^( *)if test "x\$TOOLCHAIN_TYPE" = xmicrosoft; then\n( *)RC_FLAGS="-nologo -l 0x409 -r"\n/$1if test "x\$OPENJDK_TARGET_OS" = xwindows; then\n$2RC_FLAGS=""\n$2if test "x\$TOOLCHAIN_TYPE" = xmicrosoft; then\n$2  RC_FLAGS="-nologo -l 0x409 -r"\n$2fi\n/m' "$f"
+    perl -pi -e 's/-d ([^ ]*JDK_)/-D $1/g; s/-d NDEBUG/-D NDEBUG/' "$f"
+    grep -q '^    RC_FLAGS=""$' "$f" || {
+      echo "failed to rescope the RC_FLAGS block in $f" >&2; exit 1; }
+    ! grep -qE -- '-d [^ ]*JDK_' "$f" || {
+      echo "failed to convert the resource defines to -D in $f" >&2; exit 1; }
+    log "Giving the mingw resource compiler its version defines ($(basename "$f"))"
+  done
+
   # Keep the generated script newer than the .m4 it came from, so the staleness
   # check in configure stays quiet on a host that does have hg.
   touch "$AC8/generated-configure.sh"
