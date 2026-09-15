@@ -235,8 +235,8 @@ fix_globaldefinitions_gcc() {
     # <inttypes.h> is below the "#if defined(LINUX)" line, on 25 it is above it
     # and this must do nothing.
     if [ -f "$GD" ] && grep -q '^#include <errno.h>$' "$GD"; then
-      gd_inttypes=$(grep -n '^#include <inttypes.h>$' "$GD" | head -n1 | cut -d: -f1)
-      gd_linux=$(grep -n '^#if defined(LINUX)' "$GD" | head -n1 | cut -d: -f1)
+      gd_inttypes=$(grep -n '^#include <inttypes.h>$' "$GD" | head -n1 | cut -d: -f1 || true)
+      gd_linux=$(grep -n '^#if defined(LINUX)' "$GD" | head -n1 | cut -d: -f1 || true)
       if [ -n "$gd_linux" ] && { [ -z "$gd_inttypes" ] || [ "$gd_inttypes" -gt "$gd_linux" ]; }; then
         perl -0pi -e 's/^#include <errno\.h>$/#include <errno.h>\n\n#ifdef __MINGW32__\n\/\/ 21 includes these only for linux and the BSDs; PRIxPTR, and so PTR_FORMAT,\n\/\/ is needed everywhere.\n#include <stdint.h>\n#include <inttypes.h>\n#endif/m' "$GD"
         grep -q '^\/\/ is needed everywhere\.$' "$GD" || {
@@ -369,8 +369,10 @@ fix_accessbridge_rc_case() {
     # every reference on the lowercase name the other two .rc files already use.
     if [ -f "$ABRC.RC" ] && [ ! -f "$ABRC.rc" ]; then
       mv "$ABRC.RC" "$ABRC.rc"
-      grep -rl 'AccessBridgeStatusWindow\.RC' --include='*.gmk' "$ABMK" 2>/dev/null \
-        | xargs -r sed -i 's/AccessBridgeStatusWindow\.RC/AccessBridgeStatusWindow.rc/g'
+      # 8 already spells every reference in lowercase, so grep finding nothing
+      # here is the normal case; without the guard pipefail ends the script.
+      { grep -rl 'AccessBridgeStatusWindow\.RC' --include='*.gmk' "$ABMK" 2>/dev/null \
+        | xargs -r sed -i 's/AccessBridgeStatusWindow\.RC/AccessBridgeStatusWindow.rc/g'; } || true
       if grep -rq 'AccessBridgeStatusWindow\.RC' --include='*.gmk' "$ABMK" 2>/dev/null; then
         echo "failed to settle AccessBridgeStatusWindow on one spelling" >&2; exit 1
       fi
@@ -3343,7 +3345,9 @@ if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ] && [ "${TARGET%%-*}" 
   # on here. Address the line under that branch rather than the text, which
   # appears again under SOLARIS.
   GD8="$SRC/hotspot/src/share/vm/utilities/globalDefinitions_gcc.hpp"
-  gd_elif=$(grep -n '^#elif defined(LINUX).*__MINGW32__)$' "$GD8" | head -n1 | cut -d: -f1)
+  # A failing pipeline inside a command substitution ends the script under
+  # pipefail, which would lose the message below.
+  gd_elif=$(grep -n '^#elif defined(LINUX).*__MINGW32__)$' "$GD8" | head -n1 | cut -d: -f1 || true)
   [ -n "$gd_elif" ] || { echo "no mingw g_isnan branch in $GD8" >&2; exit 1; }
   if sed -n "$((gd_elif + 1))p" "$GD8" | grep -q 'isnanf'; then
     sed -i "$((gd_elif + 1))s/isnanf/isnan/" "$GD8"
