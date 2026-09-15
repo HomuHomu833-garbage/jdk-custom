@@ -3367,6 +3367,20 @@ if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ] && [ "${TARGET%%-*}" 
   # 8 keeps jdk.pack under the old source layout, but the header is the same.
   fix_jdk_pack_mkdir "$SRC/jdk/src/share/native/com/sun/java/util/jar/pack/defines.h"
 
+  # zip.cpp calls gmtime_r, which mingw declares only under one of the POSIX
+  # feature macros, so with 8's include set it is not there at all:
+  #   zip.cpp:437: error: use of undeclared identifier 'gmtime_r'
+  # Windows spells the reentrant call gmtime_s, with the arguments the other way
+  # round and 0 for success. Put the shim in the windows block the mkdir fix
+  # just opened, which is where jdk.pack keeps its other platform spellings.
+  PACKDEF8="$SRC/jdk/src/share/native/com/sun/java/util/jar/pack/defines.h"
+  if ! grep -q 'define gmtime_r' "$PACKDEF8"; then
+    perl -pi -e 's{^#define MKDIR\(dir\) mkdir\(dir\)$}{#define MKDIR(dir) mkdir(dir)\n#define gmtime_r(t, s) (gmtime_s((s), (t)) == 0 ? (s) : NULL)}' "$PACKDEF8"
+    grep -q 'define gmtime_r' "$PACKDEF8" || {
+      echo "failed to give jdk.pack a gmtime_r for mingw" >&2; exit 1; }
+    log "Mapping gmtime_r onto gmtime_s in jdk.pack"
+  fi
+
   # Throwable.c declares fillInStackTrace's third parameter as int, while the
   # generated header says jint. On unix those are the same type; the windows
   # jni_md.h makes jint a long, so C sees two different functions:
