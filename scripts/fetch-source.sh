@@ -1674,9 +1674,13 @@ PYEOF
     # a caller that named its own linker is left alone. Expressed twice, because
     # 25 picks the linker from LINK_TYPE under make/common/native/ while 21 and
     # older name a whole toolchain (TOOLCHAIN_LINK_CXX) in NativeCompilation.gmk.
+    # 8 ships a NativeCompilation.gmk of its own that predates the toolchain
+    # abstraction and has no $1_EXTRA_FILES line to anchor on, so require the
+    # anchor and leave that release to fail on its own terms instead of here.
     NCG="$SRC/make/common/NativeCompilation.gmk"
     if [ -f "$NCG" ] && ! grep -q 'INFERRED_LINK_TYPE' "$NCG" \
-       && ! grep -q 'SetupSourceFiles' "$NCG"; then
+       && ! grep -q 'SetupSourceFiles' "$NCG" \
+       && grep -qF '$1_SRCS += $$($1_EXTRA_FILES)' "$NCG"; then
       awk '
         { print }
         !done && $0 == "  $1_SRCS += $$($1_EXTRA_FILES)" {
