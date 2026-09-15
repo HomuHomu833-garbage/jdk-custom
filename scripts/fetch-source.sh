@@ -3316,16 +3316,19 @@ if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ] && [ "${TARGET%%-*}" 
       echo "no bare _MSC_VER version tests found in hotspot's windows sources" >&2; exit 1; }
   [ "$msc_fixed" -gt 0 ] && log "Guarding $msc_fixed windows source files against an undefined _MSC_VER"
 
-  # os_windows.hpp declares WinSock2Dll in terms of LPWSADATA without including
-  # anything: under MSVC <windows.h> drags in <winsock.h>, but this build passes
-  # WIN32_LEAN_AND_MEAN, which is exactly what that suppresses.
+  # hotspot's windows sources lean on what <windows.h> pulls in by default, and
+  # this build passes WIN32_LEAN_AND_MEAN, which is exactly what suppresses the
+  # extra headers. Two groups are missing: winsock, for the LPWSADATA in
+  # os_windows.hpp's WinSock2Dll, and the multimedia timers os_windows.cpp calls.
   #   os_windows.hpp:174: error: unknown type name 'LPWSADATA'
+  #   os_windows.cpp:131: error: use of undeclared identifier 'timeBeginPeriod'
+  # Add them where the rest of the windows include chain starts.
   JVMW="$SRC/hotspot/src/os/windows/vm/jvm_windows.h"
   if ! grep -q '^#include <winsock2.h>$' "$JVMW"; then
-    perl -pi -e 's/^#include <windows\.h>$/#include <windows.h>\n\/\/ WIN32_LEAN_AND_MEAN keeps windows.h from reaching winsock; hotspot needs it.\n#include <winsock2.h>/' "$JVMW"
-    grep -q '^#include <winsock2.h>$' "$JVMW" || {
-      echo "failed to include <winsock2.h> in jvm_windows.h" >&2; exit 1; }
-    log "Including <winsock2.h> for hotspot's WinSock2Dll"
+    perl -pi -e 's/^#include <windows\.h>$/#include <windows.h>\n\/\/ WIN32_LEAN_AND_MEAN keeps windows.h from reaching these; hotspot needs both.\n#include <winsock2.h>\n#include <mmsystem.h>/' "$JVMW"
+    grep -q '^#include <mmsystem.h>$' "$JVMW" || {
+      echo "failed to add the winsock and mmsystem includes to jvm_windows.h" >&2; exit 1; }
+    log "Including <winsock2.h> and <mmsystem.h> for hotspot's windows sources"
   fi
 
   HSL="$SRC/hotspot/make/linux"
