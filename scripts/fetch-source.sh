@@ -256,6 +256,15 @@ def sub(old, new, label, want=1):
                          % (label, n, want))
     s = s.replace(old, new)
 
+def alt(cands, label):
+    # exactly one release-specific spelling must match
+    global s
+    for old, new in cands:
+        if s.count(old) == 1:
+            s = s.replace(old, new, 1)
+            return
+    raise SystemExit("os_windows.cpp: %s matched no known form" % label)
+
 # The arch name in the fatal error header.
 sub("  #define __CPU__ amd64\n",
     "  #define __CPU__ amd64\n#elif defined(_M_ARM)\n  #define __CPU__ arm\n",
@@ -311,17 +320,29 @@ sub("#if defined(_M_ARM64)\n"
     "  address pc = (address) exceptionInfo->ContextRecord->Pc;\n",
     "top level filter pc", want=2)
 
-# topLevelUnhandledExceptionFilter, one indent deeper.
-sub("#if defined(_M_ARM64)\n"
-    "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
-    "#elif defined(_M_AMD64)\n"
-    "    address pc = (address) exceptionInfo->ContextRecord->Rip;\n",
-    "#if defined(_M_ARM64)\n"
-    "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
-    "#elif defined(_M_AMD64)\n"
-    "    address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
-    "#elif defined(_M_ARM)\n"
-    "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n",
+# topLevelUnhandledExceptionFilter. 25 and 21 indent it one level deeper than
+# the other two filters; 17 keeps it level with them and drops the space after
+# the cast on the ARM64 arm, so the spelling has to be tried both ways.
+alt([("#if defined(_M_ARM64)\n"
+      "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
+      "#elif defined(_M_AMD64)\n"
+      "    address pc = (address) exceptionInfo->ContextRecord->Rip;\n",
+      "#if defined(_M_ARM64)\n"
+      "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n"
+      "#elif defined(_M_AMD64)\n"
+      "    address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
+      "#elif defined(_M_ARM)\n"
+      "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n"),
+     ("#if defined(_M_ARM64)\n"
+      "  address pc = (address)exceptionInfo->ContextRecord->Pc;\n"
+      "#elif defined(_M_AMD64)\n"
+      "  address pc = (address) exceptionInfo->ContextRecord->Rip;\n",
+      "#if defined(_M_ARM64)\n"
+      "  address pc = (address)exceptionInfo->ContextRecord->Pc;\n"
+      "#elif defined(_M_AMD64)\n"
+      "  address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
+      "#elif defined(_M_ARM)\n"
+      "  address pc = (address)exceptionInfo->ContextRecord->Pc;\n")],
     "unhandled filter pc")
 
 # Assembler::locate_next_instruction exists on aarch64 and x86 but not on
@@ -397,13 +418,16 @@ def edit(path, subs):
         s = s.replace(old, new)
     io.open(path, 'w', encoding='utf-8', newline='').write(s)
 
-def alt(path, cands, label):
-    # exactly one release-specific spelling must match
+def alt(path, cands, label, optional=False):
+    # exactly one release-specific spelling must match, unless the site itself
+    # is absent from this release
     s = io.open(path, encoding='utf-8', newline='').read()
     for old, new in cands:
         if s.count(old) == 1:
             io.open(path, 'w', encoding='utf-8', newline='').write(s.replace(old, new, 1))
             return
+    if optional:
+        return
     raise SystemExit("%s: %s matched no known form" % (path.split('/')[-1], label))
 
 # An ARM64EC process is x64-compatible, so every CONTEXT windows hands us is the
@@ -437,14 +461,6 @@ edit(shared, [
      "#if defined(_M_ARM64) || defined(__arm64ec__)\n  #define PC_NAME Pc\n",
      "PC_NAME", 1),
 
-    # Both Handle_Exception accesses go through the macro. On every other target
-    # it expands to nothing.
-    ("  if (thread != nullptr && thread->is_Java_thread()) {\n"
-     "    JavaThread::cast(thread)->set_saved_exception_pc((address)(DWORD_PTR)exceptionInfo->ContextRecord->PC_NAME);",
-     "  if (thread != nullptr && thread->is_Java_thread()) {\n"
-     "    JavaThread::cast(thread)->set_saved_exception_pc((address)(DWORD_PTR)HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME);",
-     "saved_exception_pc", 1),
-
     ("  exceptionInfo->ContextRecord->PC_NAME = (DWORD64)handler;",
      "  HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME = (DWORD64)handler;",
      "PC_NAME assignment", 1),
@@ -475,12 +491,20 @@ edit(shared, [
      "#if defined(_M_ARM64) || defined(__arm64ec__)\n    if (in_java &&\n",
      "sigill not_entrant", "optional"),
 
-    # topLevelUnhandledExceptionFilter, whose fallback reads Eip.
+    # topLevelUnhandledExceptionFilter, whose fallback reads Eip. 17 keeps it at
+    # the same indent as the other filters and drops the space after the cast,
+    # so that spelling is handled by the alt below instead.
     ("#if defined(_M_ARM64)\n"
      "    address pc = (address) exceptionInfo->ContextRecord->Pc;\n",
      "#if defined(_M_ARM64) || defined(__arm64ec__)\n"
      "    address pc = (address) HS_ARM64_CTX(exceptionInfo->ContextRecord)->Pc;\n",
-     "unhandled filter pc", 1),
+     "unhandled filter pc", "optional"),
+
+    ("#if defined(_M_ARM64)\n"
+     "  address pc = (address)exceptionInfo->ContextRecord->Pc;\n",
+     "#if defined(_M_ARM64) || defined(__arm64ec__)\n"
+     "  address pc = (address)HS_ARM64_CTX(exceptionInfo->ContextRecord)->Pc;\n",
+     "unhandled filter pc, 17 spelling", "optional"),
 
     # ARM64EC runs on ARM64 hardware, so it has the same 48-bit address space.
     ("#ifdef _M_ARM64\n  // AArch64 has a maximum addressable space of 48-bits\n",
@@ -500,6 +524,16 @@ edit(shared, [
      "  #define sampling_context_flags (CONTEXT_FULL | CONTEXT_FLOATING_POINT)\n",
      "sampling_context_flags (with an IA32 arm ahead of it)", "optional"),
 ])
+
+# Handle_Exception saves the faulting pc before redirecting. 17 reaches the
+# JavaThread as thread->as_Java_thread(), which 21 replaced with
+# JavaThread::cast(thread).
+alt(shared, [
+    ("    JavaThread::cast(thread)->set_saved_exception_pc((address)(DWORD_PTR)exceptionInfo->ContextRecord->PC_NAME);",
+     "    JavaThread::cast(thread)->set_saved_exception_pc((address)(DWORD_PTR)HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME);"),
+    ("    thread->as_Java_thread()->set_saved_exception_pc((address)(DWORD_PTR)exceptionInfo->ContextRecord->PC_NAME);",
+     "    thread->as_Java_thread()->set_saved_exception_pc((address)(DWORD_PTR)HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME);"),
+], "saved_exception_pc")
 
 # clang defines _M_AMD64 for ARM64EC, so these two blocks, which are not part of
 # an #elif chain, would otherwise compile and call into an x86 VM_Version and an
@@ -529,7 +563,7 @@ alt(shared, [
      "    if ((in_java || in_native) && handle_FLT_exception(exceptionInfo)) {",
      "#if (defined(_M_AMD64) || defined(_M_IX86)) && !defined(__arm64ec__)\n"
      "    if ((in_java || in_native) && handle_FLT_exception(exceptionInfo)) {"),
-], "handle_FLT_exception block")
+], "handle_FLT_exception block", optional=True)  # 17 has no FLT handler
 
 # The os_cpu file reads the ARM64 registers by name throughout, so give it one
 # type to work in.
@@ -610,12 +644,18 @@ edit(oscpu, [
 missing = (13, 14, 16, 17, 18, 23, 24, 28)
 s = io.open(oscpu, encoding='utf-8', newline='').read()
 for r in missing:
-    old = '      CASE_PRINT_REG(%2d, "X%d=", X%d); break;\n' % (r, r, r)
-    if s.count(old) != 1:
-        old = '      CASE_PRINT_REG(%2d, " X%d=", X%d); break;\n' % (r, r, r)
-    if s.count(old) != 1:
-        raise SystemExit("os_windows_aarch64.cpp: no single CASE_PRINT_REG for X%d" % r)
-    s = s.replace(old, '#ifndef __arm64ec__\n' + old + '#endif\n', 1)
+    # 21 and 25 walk the registers by index through CASE_PRINT_REG; 17 predates
+    # that and prints them as a flat sequence.
+    forms = ['      CASE_PRINT_REG(%2d, "X%d=", X%d); break;\n' % (r, r, r),
+             '      CASE_PRINT_REG(%2d, " X%d=", X%d); break;\n' % (r, r, r),
+             '  st->print("X%d="); print_location(st, uc->X%d);\n' % (r, r),
+             '  st->print(" X%d="); print_location(st, uc->X%d);\n' % (r, r)]
+    for old in forms:
+        if s.count(old) == 1:
+            s = s.replace(old, '#ifndef __arm64ec__\n' + old + '#endif\n', 1)
+            break
+    else:
+        raise SystemExit("os_windows_aarch64.cpp: no single register print for X%d" % r)
 io.open(oscpu, 'w', encoding='utf-8', newline='').write(s)
 
 print("arm64ec: shared and os_cpu context handling applied")
