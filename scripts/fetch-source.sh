@@ -3313,6 +3313,17 @@ edits = [
      "ADLC_UPDATER_DIRECTORY = $(GAMMADIR)/make/$(OS)",
      "ADLC_UPDATER_DIRECTORY = $(GAMMADIR)/make/linux",
      "the adlc_updater directory"),
+    # adlc itself runs on the build host, but is compiled with the target's
+    # sysdefs, so on a windows target adlc.hpp takes a branch that defines
+    # intptr_t only under _WIN32 and skips <inttypes.h>, which is spelled
+    # "#if defined(LINUX)". The host is always linux here:
+    #   adlc/archDesc.cpp:548: error: unknown type name 'intptr_t'
+    # ADLCFLAGS keeps the target defines, which is right: those describe the
+    # machine being generated for and end up in the generated source.
+    ("makefiles/adlc.make",
+     "CXXFLAGS = $(SYSDEFS) $(INCLUDES)",
+     "CXXFLAGS = $(filter-out -DWINDOWS -D_WINDOWS,$(SYSDEFS)) -DLINUX $(INCLUDES)",
+     "the adlc host defines"),
     # os/posix is added unconditionally, being true of every OS the GNU-make
     # build served. windows is the exception.
     ("makefiles/vm.make",
