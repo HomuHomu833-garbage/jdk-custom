@@ -3435,6 +3435,18 @@ edits = [
      "PICFLAG = -fPIC",
      "PICFLAG =",
      "the PIC flag"),
+    # The VM is not the only thing the linux build makes: libjsig chains signal
+    # handlers, libjvm_db is dtrace, and libsaproc is the serviceability agent.
+    # None has a windows counterpart, and jsig is the one that stops the build:
+    #   No rule to make target 'src/os/windows/vm/jsig.c', needed by 'libjsig.so'
+    ("makefiles/vm.make",
+     "build: $(LIBJVM) $(LAUNCHER) $(LIBJSIG) $(LIBJVM_DB) $(BUILDLIBSAPROC) dtraceCheck",
+     "build: $(LIBJVM) $(LAUNCHER)",
+     "the unix companion libraries"),
+    ("makefiles/vm.make",
+     "install: install_jvm install_jsig install_saproc",
+     "install: install_jvm",
+     "the companion library install"),
 ]
 
 p = f"{hsl}/platform_amd64"
