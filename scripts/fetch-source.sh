@@ -353,6 +353,21 @@ PYEOF
             out=$(echo "$b" | sed 's/windows_aarch64/windows_arm/')
             sed -e 's/WINDOWS_AARCH64/WINDOWS_ARM/g' -e 's/windows_aarch64/windows_arm/g'                 "$A64_SRC/$b" > "$PORT_DST/$out"
           done
+          # 11's cpu/arm carries both the 32-bit and the 64-bit ARM sources, and
+          # the exclusion that picks one is keyed on the target being linux:
+          #   assembler_arm_64.cpp: no member named 'LogicalImmediate'
+          # Which width to build depends on the CPU, not the OS. Later releases
+          # keep the same linux-only gate but ship no _64 files, so widening it
+          # changes nothing there.
+          CJVM="$SRC/make/hotspot/lib/CompileJvm.gmk"
+          if [ -f "$CJVM" ] && grep -q 'isTargetOs, linux) $(call isTargetCpu, arm))' "$CJVM"; then
+            sed -i 's@$(call isTargetOs, linux) $(call isTargetCpu, arm))@$(call isTargetOs, linux windows) $(call isTargetCpu, arm))@' "$CJVM"
+            if ! grep -q 'isTargetOs, linux windows) $(call isTargetCpu, arm))' "$CJVM"; then
+              echo "failed to widen the ARM source selection to windows" >&2; exit 1
+            fi
+            log "Excluding the 64-bit ARM sources on a 32-bit ARM windows target"
+          fi
+
           # print_tos_pc is per-os_cpu in 17, shared windows code in 21 and 25,
           # and absent in 11. Keep the port's copy only where this release's own
           # windows_aarch64 carries one.
@@ -703,6 +718,12 @@ edit(shared, [
     ("#elif defined(_M_ARM64)\n  #define PC_NAME Pc\n",
      "#elif defined(_M_ARM64) || defined(__arm64ec__)\n  #define PC_NAME Pc\n",
      "PC_NAME with the ARM64 arm last", "optional"),
+
+    # and with AMD64 leading that chain, ARM64EC would take Rip before ever
+    # reaching the arm above, since clang defines _M_AMD64 for it
+    ("#if defined(_M_AMD64)\n  #define PC_NAME Rip\n",
+     "#if defined(_M_AMD64) && !defined(__arm64ec__)\n  #define PC_NAME Rip\n",
+     "PC_NAME with the AMD64 arm leading", "optional"),
 
     ("  exceptionInfo->ContextRecord->PC_NAME = (DWORD64)handler;",
      "  HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME = (DWORD64)handler;",
