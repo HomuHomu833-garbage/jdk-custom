@@ -240,6 +240,11 @@ void os::print_context(outputStream *st, const void *context) {
   st->cr();
 }
 
+// print_register_info gained a continuation index in 21, so the error handler
+// can print the registers in bounded chunks; before that it took two arguments
+// and printed them all at once. Both are here and fetch-source.sh keeps the one
+// this release declares.
+// BEGIN print_register_info with continuation
 void os::print_register_info(outputStream *st, const void *context, int& continuation) {
   const int register_count = 13 /* R0-R12 */;
   int n = continuation;
@@ -272,6 +277,34 @@ void os::print_register_info(outputStream *st, const void *context, int& continu
     ++n;
   }
 }
+// END print_register_info with continuation
+// BEGIN print_register_info without continuation
+void os::print_register_info(outputStream *st, const void *context) {
+  if (context == nullptr) return;
+
+  const CONTEXT* uc = (const CONTEXT*)context;
+
+  st->print_cr("Register to memory mapping:");
+  st->cr();
+  st->print(" R0="); print_location(st, uc->R0);
+  st->print(" R1="); print_location(st, uc->R1);
+  st->print(" R2="); print_location(st, uc->R2);
+  st->print(" R3="); print_location(st, uc->R3);
+  st->cr();
+  st->print(" R4="); print_location(st, uc->R4);
+  st->print(" R5="); print_location(st, uc->R5);
+  st->print(" R6="); print_location(st, uc->R6);
+  st->print(" R7="); print_location(st, uc->R7);
+  st->cr();
+  st->print(" R8="); print_location(st, uc->R8);
+  st->print(" R9="); print_location(st, uc->R9);
+  st->print("R10="); print_location(st, uc->R10);
+  st->print("R11="); print_location(st, uc->R11);
+  st->cr();
+  st->print("R12="); print_location(st, uc->R12);
+  st->cr();
+}
+// END print_register_info without continuation
 
 void os::setup_fpu() {
 }

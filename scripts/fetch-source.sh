@@ -353,6 +353,29 @@ PYEOF
             out=$(echo "$b" | sed 's/windows_aarch64/windows_arm/')
             sed -e 's/WINDOWS_AARCH64/WINDOWS_ARM/g' -e 's/windows_aarch64/windows_arm/g'                 "$A64_SRC/$b" > "$PORT_DST/$out"
           done
+          # print_register_info gained a continuation index in 21 so the error
+          # handler can print registers in bounded chunks. The port carries both
+          # shapes; keep the one this release declares.
+          if grep -q 'print_register_info(outputStream\* st, const void\* context, int& continuation)'                   "$SRC/src/hotspot/share/runtime/os.hpp"; then
+            drop_begin='// BEGIN print_register_info without continuation'
+            drop_end='// END print_register_info without continuation'
+          else
+            drop_begin='// BEGIN print_register_info with continuation'
+            drop_end='// END print_register_info with continuation'
+          fi
+          python3 - "$PORT_DST/os_windows_arm.cpp" "$drop_begin" "$drop_end" <<'PYEOF'
+import io, sys
+p, b, e = sys.argv[1], sys.argv[2], sys.argv[3]
+s = io.open(p, encoding='utf-8', newline='').read()
+start = s.index(b)
+end = s.index(e) + len(e) + 1
+io.open(p, 'w', encoding='utf-8', newline='').write(s[:start] + s[end:])
+PYEOF
+          if [ "$(grep -c 'void os::print_register_info' "$PORT_DST/os_windows_arm.cpp")" != 1 ]; then
+            echo "expected exactly one print_register_info after trimming" >&2; exit 1
+          fi
+          log "Keeping the print_register_info this release declares"
+
           # JavaThread moved out of runtime/thread.hpp into runtime/javaThread.hpp
           # in 21, and the port's own sources include the newer name.
           if [ ! -f "$SRC/src/hotspot/share/runtime/javaThread.hpp" ]; then
