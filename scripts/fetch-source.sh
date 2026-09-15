@@ -458,18 +458,26 @@ def sub(old, new, label, want=1):
         if n:
             s = s.replace(old, new)
         return
+    if want == "all":
+        if n == 0:
+            raise SystemExit("os_windows.cpp: %s matched nothing" % label)
+        s = s.replace(old, new)
+        return
     if n != want:
         raise SystemExit("os_windows.cpp: %s matched %d times, expected %d"
                          % (label, n, want))
     s = s.replace(old, new)
 
-def alt(cands, label):
-    # exactly one release-specific spelling must match
+def alt(cands, label, optional=False):
+    # exactly one release-specific spelling must match, unless the site is
+    # absent or already covered by a broader replacement above
     global s
     for old, new in cands:
         if s.count(old) == 1:
             s = s.replace(old, new, 1)
             return
+    if optional:
+        return
     raise SystemExit("os_windows.cpp: %s matched no known form" % label)
 
 # The arch name in the fatal error header.
@@ -525,7 +533,7 @@ sub("#if defined(_M_ARM64)\n"
     "  address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
     "#elif defined(_M_ARM)\n"
     "  address pc = (address) exceptionInfo->ContextRecord->Pc;\n",
-    "top level filter pc", want=2)
+    "top level filter pc", want="all")
 
 # topLevelUnhandledExceptionFilter. 25 and 21 indent it one level deeper than
 # the other two filters; 17 keeps it level with them and drops the space after
@@ -550,18 +558,41 @@ alt([("#if defined(_M_ARM64)\n"
       "  address pc = (address) exceptionInfo->ContextRecord->Rip;\n"
       "#elif defined(_M_ARM)\n"
       "  address pc = (address)exceptionInfo->ContextRecord->Pc;\n")],
-    "unhandled filter pc")
+    "unhandled filter pc", optional=True)
 
 # Assembler::locate_next_instruction exists on aarch64 and x86 but not on
 # 32-bit ARM, where every instruction is the same width. os_cpu/linux_arm
 # computes the same thing as pc + Assembler::InstructionSize.
-sub("        address next_pc =  Assembler::locate_next_instruction(pc);",
-    "#ifdef _M_ARM\n"
-    "        address next_pc = pc + Assembler::InstructionSize;\n"
-    "#else\n"
-    "        address next_pc =  Assembler::locate_next_instruction(pc);\n"
-    "#endif",
+# 11 inlines this into the Handle_Exception argument instead of naming a
+# next_pc local first, so it needs a helper rather than a block.
+alt([("        address next_pc =  Assembler::locate_next_instruction(pc);",
+      "#ifdef _M_ARM\n"
+      "        address next_pc = pc + Assembler::InstructionSize;\n"
+      "#else\n"
+      "        address next_pc =  Assembler::locate_next_instruction(pc);\n"
+      "#endif"),
+     ("SharedRuntime::handle_unsafe_access(thread, (address)Assembler::locate_next_instruction(pc))",
+      "SharedRuntime::handle_unsafe_access(thread, hs_windows_next_pc(pc))")],
     "locate_next_instruction")
+
+if "hs_windows_next_pc(pc)" in s:
+    HELPER = """
+// os_cpu/linux_arm computes the next pc as pc + Assembler::InstructionSize.
+// There is no locate_next_instruction on 32-bit ARM, where every instruction
+// is the same width.
+static inline address hs_windows_next_pc(address pc) {
+#ifdef _M_ARM
+  return pc + Assembler::InstructionSize;
+#else
+  return (address)Assembler::locate_next_instruction(pc);
+#endif
+}
+
+"""
+    _anchor = "LONG Handle_Exception(struct _EXCEPTION_POINTERS* exceptionInfo,"
+    if s.count(_anchor) != 1:
+        raise SystemExit("os_windows.cpp: cannot place the next-pc helper")
+    s = s.replace(_anchor, HELPER + _anchor, 1)
 
 # The thread-sampling context flags. 21 puts an IA32 arm ahead of this one, so
 # match the condition itself rather than the directive in front of it.
@@ -666,7 +697,12 @@ edit(shared, [
 
     ("#if defined(_M_ARM64)\n  #define PC_NAME Pc\n",
      "#if defined(_M_ARM64) || defined(__arm64ec__)\n  #define PC_NAME Pc\n",
-     "PC_NAME", 1),
+     "PC_NAME", "optional"),
+
+    # 11 lists the ARM64 arm last, after AMD64 and IX86, so it is an #elif there
+    ("#elif defined(_M_ARM64)\n  #define PC_NAME Pc\n",
+     "#elif defined(_M_ARM64) || defined(__arm64ec__)\n  #define PC_NAME Pc\n",
+     "PC_NAME with the ARM64 arm last", "optional"),
 
     ("  exceptionInfo->ContextRecord->PC_NAME = (DWORD64)handler;",
      "  HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME = (DWORD64)handler;",
@@ -692,7 +728,7 @@ edit(shared, [
      "  address pc = (address) exceptionInfo->ContextRecord->Pc;\n",
      "#if defined(_M_ARM64) || defined(__arm64ec__)\n"
      "  address pc = (address) HS_ARM64_CTX(exceptionInfo->ContextRecord)->Pc;\n",
-     "top level filter pc", 2),
+     "top level filter pc", None),
 
     ("#ifdef _M_ARM64\n    if (in_java &&\n",
      "#if defined(_M_ARM64) || defined(__arm64ec__)\n    if (in_java &&\n",
@@ -732,14 +768,16 @@ edit(shared, [
      "sampling_context_flags (with an IA32 arm ahead of it)", "optional"),
 ])
 
-# Handle_Exception saves the faulting pc before redirecting. 17 reaches the
-# JavaThread as thread->as_Java_thread(), which 21 replaced with
-# JavaThread::cast(thread).
+# Handle_Exception saves the faulting pc before redirecting, and each release
+# reaches the JavaThread differently: 11 casts, 17 calls as_Java_thread(), 21
+# replaced that with JavaThread::cast.
 alt(shared, [
     ("    JavaThread::cast(thread)->set_saved_exception_pc((address)(DWORD_PTR)exceptionInfo->ContextRecord->PC_NAME);",
      "    JavaThread::cast(thread)->set_saved_exception_pc((address)(DWORD_PTR)HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME);"),
     ("    thread->as_Java_thread()->set_saved_exception_pc((address)(DWORD_PTR)exceptionInfo->ContextRecord->PC_NAME);",
      "    thread->as_Java_thread()->set_saved_exception_pc((address)(DWORD_PTR)HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME);"),
+    ("    ((JavaThread*)thread)->set_saved_exception_pc((address)(DWORD_PTR)exceptionInfo->ContextRecord->PC_NAME);",
+     "    ((JavaThread*)thread)->set_saved_exception_pc((address)(DWORD_PTR)HS_ARM64_CTX(exceptionInfo->ContextRecord)->PC_NAME);"),
 ], "saved_exception_pc")
 
 # clang defines _M_AMD64 for ARM64EC, so these two blocks, which are not part of
@@ -759,6 +797,11 @@ alt(shared, [
      "#if (defined(_M_AMD64) || defined(_M_IX86)) && !defined(__arm64ec__)\n"
      "  if ((exception_code == EXCEPTION_ACCESS_VIOLATION) &&\n"
      "      VM_Version::is_cpuinfo_segv_addr(pc)) {"),
+    # 11 tests the address alone, one indent deeper
+    ("#if defined(_M_AMD64) || defined(_M_IX86)\n"
+     "    if (VM_Version::is_cpuinfo_segv_addr(pc)) {",
+     "#if (defined(_M_AMD64) || defined(_M_IX86)) && !defined(__arm64ec__)\n"
+     "    if (VM_Version::is_cpuinfo_segv_addr(pc)) {"),
 ], "cpuinfo probe block")
 
 alt(shared, [
@@ -834,6 +877,11 @@ edit(oscpu, [
      '  st->print(  "X0 =" INTPTR_FORMAT, uc->X0);',
      "print_context EC branch", 1),
 
+])
+
+# Closing the EC branch: 17 and later end print_context right after the
+# registers, while 11 goes on to dump the stack top in the same function.
+alt(oscpu, [
     ('  st->print(", X28=" INTPTR_FORMAT, uc->X28);\n'
      '  st->cr();\n'
      '  st->cr();\n'
@@ -842,9 +890,15 @@ edit(oscpu, [
      '  st->cr();\n'
      '#endif\n'
      '  st->cr();\n'
-     '}',
-     "print_context EC branch close", 1),
-])
+     '}'),
+    ('  st->print(", X28=" INTPTR_FORMAT, uc->X28);\n'
+     '  st->cr();\n'
+     '  st->cr();\n',
+     '  st->print(", X28=" INTPTR_FORMAT, uc->X28);\n'
+     '  st->cr();\n'
+     '#endif\n'
+     '  st->cr();\n'),
+], "print_context EC branch close")
 
 # print_register_info walks X0 to X28 by index; leave a gap where ARM64EC has
 # no register. A missing case prints nothing and the walk still advances.
