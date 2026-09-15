@@ -3302,6 +3302,17 @@ edits = [
      "$(GAMMADIR)/make/$(Platform_os_family)/makefiles/adjust-mflags.sh",
      "$(GAMMADIR)/make/linux/makefiles/adjust-mflags.sh",
      "the adjust-mflags path"),
+    # adlc.make reaches for the same two shared files. Its own OS variable stays
+    # windows: that one names the .ad file to read, windows_x86_64.ad, which is
+    # a source file and really is per target.
+    ("makefiles/adlc.make",
+     "include $(GAMMADIR)/make/$(Platform_os_family)/makefiles/rules.make",
+     "include $(GAMMADIR)/make/linux/makefiles/rules.make",
+     "the adlc rules include"),
+    ("makefiles/adlc.make",
+     "ADLC_UPDATER_DIRECTORY = $(GAMMADIR)/make/$(OS)",
+     "ADLC_UPDATER_DIRECTORY = $(GAMMADIR)/make/linux",
+     "the adlc_updater directory"),
     # os/posix is added unconditionally, being true of every OS the GNU-make
     # build served. windows is the exception.
     ("makefiles/vm.make",
