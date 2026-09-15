@@ -392,6 +392,8 @@ PYEOF
           else
             pro_begin='// BEGIN prologue, ExtendedPC'
             pro_end='// END prologue, ExtendedPC'
+            # the javaThread body reads the same call's result
+            sed -i 's|os::fetch_frame_from_context(ucontext, &ret_sp, &ret_fp);|os::fetch_frame_from_context(ucontext, \&ret_sp, \&ret_fp).pc();|'                 "$PORT_DST"/*thread_windows_arm.cpp
           fi
           python3 - "$PORT_DST/os_windows_arm.cpp" "$pro_begin" "$pro_end" <<'PYEOF'
 import io, sys
