@@ -3168,3 +3168,38 @@ if [ "$JDK_VERSION" = 8 ]; then
   [ "$pic_patched" = 1 ] || {
     echo "unexpected jdk8 tree: no empty clang PICFLAG to set" >&2; exit 1; }
 fi
+
+# --- jdk8 windows: the build host's path rules are not the target's ---------
+# BASIC_SETUP_PATHS picks the PATH separator, and decides whether to go looking
+# for cygwin or msys, from OPENJDK_TARGET_OS. Cross-compiling to windows from
+# linux it therefore demands a windows shell on the build host and stops:
+#   configure: error: Unknown Windows environment. Neither cygwin nor msys was
+#   detected.
+# Everything inside that branch describes the machine configure is running on,
+# not the machine being built for, so key it on OPENJDK_BUILD_OS instead, which
+# is what 9 and later settled on. Patch the generated script as well as the .m4:
+# only the generated one runs, and it is only regenerated when hg is installed.
+if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ]; then
+  python3 - "$SRC/common/autoconf/basics.m4" "$SRC/common/autoconf/generated-configure.sh" <<'PY'
+import re, sys
+
+old = re.compile(r'( *)if test "x\$OPENJDK_TARGET_OS" = "xwindows"; then\n( *)PATH_SEP=";"')
+new = re.compile(r'if test "x\$OPENJDK_BUILD_OS" = "xwindows"; then\n *PATH_SEP=";"')
+
+for p in sys.argv[1:]:
+    s = open(p, encoding='utf-8', errors='surrogateescape').read()
+    if len(new.findall(s)) == 1:
+        print(f"{p}: PATH_SEP already keyed on the build OS")
+        continue
+    s, n = old.subn(
+        lambda m: f'{m.group(1)}if test "x$OPENJDK_BUILD_OS" = "xwindows"; then'
+                  f'\n{m.group(2)}PATH_SEP=";"', s)
+    if n != 1:
+        sys.exit(f"{p}: the PATH_SEP windows test matched {n} times, expected 1")
+    open(p, 'w', encoding='utf-8', errors='surrogateescape', newline='').write(s)
+    print(f"{p}: PATH_SEP windows test re-keyed on the build OS")
+PY
+  # autogen.sh reruns only when hg reports the .m4 dirty, which never happens in
+  # this git tree, but keep the timestamps consistent with that check anyway.
+  touch "$SRC/common/autoconf/generated-configure.sh"
+fi
