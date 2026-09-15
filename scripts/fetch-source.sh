@@ -184,6 +184,145 @@ apply_set() {
 [ -n "${PATCHSET:-}" ] && apply_set "$PATCHES_DIR/$PATCHSET/jdk/$JDK_VERSION" loose
 apply_set "$PATCHES_DIR/global/jdk/$JDK_VERSION" strict
 
+# --- globalDefinitions_gcc.hpp on mingw -------------------------------------
+# The gcc/clang half of hotspot's compiler-specific header, which windows was
+# never meant to reach: upstream sends it to globalDefinitions_visCPP.hpp. The
+# same edits serve every release here, 8 included, so they take the path as an
+# argument rather than assuming the modern source layout.
+fix_globaldefinitions_gcc() {
+    GD="$1"
+    if [ -f "$GD" ] && grep -q '^#include <alloca.h>$' "$GD"; then
+      perl -0pi -e 's/^#include <alloca\.h>$/#ifdef __MINGW32__\n#include <malloc.h>\n#else\n#include <alloca.h>\n#endif/m' "$GD"
+      log "Taking alloca from <malloc.h> in globalDefinitions_gcc.hpp"
+    fi
+    # The include survives inside the guard, so test for the guard itself or a
+    # second run nests another one around it.
+    if [ -f "$GD" ] && grep -q '^#include <dlfcn.h>$' "$GD" &&
+       ! grep -q '^#ifndef __MINGW32__$' "$GD"; then
+      perl -0pi -e 's/^#include <dlfcn\.h>\n#include <pthread\.h>$/#ifndef __MINGW32__\n#include <dlfcn.h>\n#include <pthread.h>\n#endif/m' "$GD"
+      grep -q '^#ifndef __MINGW32__$' "$GD" || {
+        echo "failed to guard the unix-only headers in globalDefinitions_gcc.hpp" >&2; exit 1; }
+      log "Skipping <dlfcn.h> and <pthread.h> in globalDefinitions_gcc.hpp"
+    fi
+
+    # Same header, further down: g_isnan is defined per platform for apple,
+    # linux, the BSDs and aix, and anything else gets
+    #   error: "missing platform-specific definition here"
+    # because windows is expected to have taken globalDefinitions_visCPP.hpp.
+    # isnan behaves the same on mingw, so mingw joins the linux branch. Only the
+    # #elif is touched, the #if above it pulls in ucontext.h and friends, which
+    # mingw genuinely lacks and must keep skipping.
+    # 21 spells that branch without _AIX (aix has its own header there), so the
+    # _AIX half is optional in the pattern; matching only 25's spelling made this
+    # a silent no-op on 21 and left the #error standing.
+    if [ -f "$GD" ] && grep -q '^#error "missing platform-specific definition here"$' "$GD"; then
+      perl -0pi -e 's/^#elif defined\(LINUX\) \|\| defined\(_ALLBSD_SOURCE\)( \|\| defined\(_AIX\))?$/#elif defined(LINUX) || defined(_ALLBSD_SOURCE)$1 || defined(__MINGW32__)/m' "$GD"
+      grep -q '^#elif defined(LINUX) || defined(_ALLBSD_SOURCE).* || defined(__MINGW32__)$' "$GD" || {
+        echo "failed to give mingw the g_isnan definitions in globalDefinitions_gcc.hpp" >&2; exit 1; }
+      log "Giving mingw the linux g_isnan definitions"
+    fi
+
+    # Same header, the include block: 21 puts <inttypes.h> inside the
+    # "#if defined(LINUX) || defined(_ALLBSD_SOURCE)" group, so PRIxPTR is never
+    # defined on a windows target, globalDefinitions.hpp builds PTR_FORMAT and
+    # INTPTR_FORMAT out of it, and every use of either becomes a bare identifier:
+    #   growableArray.hpp:334: error: expected ')'
+    #   array.hpp:152: error: expected ')'
+    # 25 hoisted <inttypes.h> and <stdint.h> out to the top for everyone; give
+    # mingw the same two rather than joining the linux branch, which also pulls
+    # in <ucontext.h> and <sys/time.h> that mingw has no use for.
+    # The test is where the include sits, not whether it is there: on 21 the only
+    # <inttypes.h> is below the "#if defined(LINUX)" line, on 25 it is above it
+    # and this must do nothing.
+    if [ -f "$GD" ] && grep -q '^#include <errno.h>$' "$GD"; then
+      gd_inttypes=$(grep -n '^#include <inttypes.h>$' "$GD" | head -n1 | cut -d: -f1)
+      gd_linux=$(grep -n '^#if defined(LINUX)' "$GD" | head -n1 | cut -d: -f1)
+      if [ -n "$gd_linux" ] && { [ -z "$gd_inttypes" ] || [ "$gd_inttypes" -gt "$gd_linux" ]; }; then
+        perl -0pi -e 's/^#include <errno\.h>$/#include <errno.h>\n\n#ifdef __MINGW32__\n\/\/ 21 includes these only for linux and the BSDs; PRIxPTR, and so PTR_FORMAT,\n\/\/ is needed everywhere.\n#include <stdint.h>\n#include <inttypes.h>\n#endif/m' "$GD"
+        grep -q '^\/\/ is needed everywhere\.$' "$GD" || {
+          echo "failed to add <inttypes.h> for mingw in globalDefinitions_gcc.hpp" >&2; exit 1; }
+        log "Including <inttypes.h> on mingw, for PRIxPTR"
+      fi
+    fi
+
+    # Same header again, 21 and older only: everything that is neither linux nor
+    # a BSD gets a block of hand-written "compiler-specific primitive types"
+    # (uint16_t, uint32_t, uint64_t, intptr_t, uintptr_t) left over from the
+    # Solaris/Studio days, and it assumes ILP32:
+    #   globalDefinitions_gcc.hpp:105: error: typedef redefinition with
+    #   different types ('int' vs 'long long')
+    # against mingw's own corecrt.h. mingw has a complete <stdint.h>, so the
+    # whole block is dead weight there; exclude it the same way linux is. 25
+    # deleted the block outright, so this finds nothing there.
+    if [ -f "$GD" ] && grep -q '^#if !defined(LINUX) && !defined(_ALLBSD_SOURCE)$' "$GD"; then
+      perl -0pi -e 's/^#if !defined\(LINUX\) && !defined\(_ALLBSD_SOURCE\)$/#if !defined(LINUX) \&\& !defined(_ALLBSD_SOURCE) \&\& !defined(__MINGW32__)/m' "$GD"
+      grep -q '^#if !defined(LINUX) && !defined(_ALLBSD_SOURCE) && !defined(__MINGW32__)$' "$GD" || {
+        echo "failed to exclude the legacy primitive typedefs in globalDefinitions_gcc.hpp" >&2; exit 1; }
+      log "Skipping the pre-stdint primitive typedefs on mingw"
+    fi
+
+    # Same header, the <math.h> include: mingw follows MSVC in hiding M_PI and
+    # the other math constants behind _USE_MATH_DEFINES, while glibc defines them
+    # unconditionally, so the gcc header never asks for them and 21's parallel GC
+    # does not get them:
+    #   psParallelCompact.cpp:917: error: use of undeclared identifier 'M_PI'
+    # globalDefinitions_visCPP.hpp defines _USE_MATH_DEFINES right before its own
+    # <math.h> for exactly this reason; do the same on mingw. It lands on 25 as
+    # well, where nothing in hotspot uses M_PI any more; it only makes the
+    # constants available, so that is a no-op in effect rather than by guard.
+    if [ -f "$GD" ] && grep -q '^#include <math.h>$' "$GD" &&
+       ! grep -q '_USE_MATH_DEFINES' "$GD"; then
+      perl -0pi -e 's/^#include <math\.h>$/#ifdef __MINGW32__\n\/\/ mingw hides M_PI and friends behind this, as MSVC does; see\n\/\/ globalDefinitions_visCPP.hpp, which defines it for the same reason.\n#define _USE_MATH_DEFINES\n#endif\n#include <math.h>/m' "$GD"
+      grep -q '^#define _USE_MATH_DEFINES$' "$GD" || {
+        echo "failed to define _USE_MATH_DEFINES for mingw in globalDefinitions_gcc.hpp" >&2; exit 1; }
+      log "Asking for the math constants (M_PI) on mingw"
+    fi
+
+    # Same header, both LP64 branches: 21 reads _LP64 as "long is 64 bits", which
+    # holds for every unix it targets but not for win64, where long stays 32 bits
+    # and intptr_t is long long. Two macros come out wrong there, and 25 deleted
+    # both, so this whole block is 21-and-older only.
+    #
+    #   NULL_WORD is 0L under _LP64. LIR_OprFact::intptrConst is overloaded on
+    #   void* and intptr_t; on linux 0L matches intptr_t exactly and wins, on
+    #   mingw it matches neither exactly:
+    #     g1BarrierSetC1.cpp:172: error: call to 'intptrConst' is ambiguous
+    #   The !_LP64 branch right below already spells the portable form, for the
+    #   same reason (macos, where intptr_t is not int32_t), take that branch.
+    if [ -f "$GD" ] && grep -q '^    #define NULL_WORD  0L$' "$GD"; then
+      perl -0pi -e 's/^  #ifdef _LP64\n    #define NULL_WORD  0L$/  #if defined(_LP64) \&\& !defined(__MINGW32__)\n    #define NULL_WORD  0L/m' "$GD"
+      grep -q '^  #if defined(_LP64) && !defined(__MINGW32__)$' "$GD" || {
+        echo "failed to give mingw the portable NULL_WORD" >&2; exit 1; }
+      log "Taking the intptr_t-cast NULL_WORD on mingw, not 0L"
+    fi
+    #   FORMAT64_MODIFIER is "l" under _LP64 except on apple, so every jlong
+    #   printed through it would go through a 32-bit conversion on win64. mingw
+    #   wants "ll" for the same reason apple does.
+    if [ -f "$GD" ] && grep -q '^# define FORMAT64_MODIFIER "l"$' "$GD"; then
+      perl -0pi -e 's/^# ifdef __APPLE__\n# define FORMAT64_MODIFIER "ll"$/# if defined(__APPLE__) || defined(__MINGW32__)\n# define FORMAT64_MODIFIER "ll"/m' "$GD"
+      grep -q '^# if defined(__APPLE__) || defined(__MINGW32__)$' "$GD" || {
+        echo "failed to give mingw the ll FORMAT64_MODIFIER" >&2; exit 1; }
+      log "Formatting 64-bit values with ll on mingw, as long is 32 bits there"
+    fi
+
+    # jni.h reaches jvm_md.h, which includes <windows.h>, which defines
+    # "interface" as a macro for struct. hotspot uses it as an ordinary
+    # identifier, opto/type.hpp declares a bool parameter called interface,
+    # so the declaration turns into "bool struct" and every call to it then has
+    # one argument too many:
+    #   type.hpp:958: error: declaration of anonymous struct must be a definition
+    #   type.hpp:1332: error: too many arguments to function call, expected 4, have 5
+    # MSVC's windows.h defers that definition to the COM headers, which hotspot
+    # never pulls in; mingw's defines it up front. Undefine it, and "small"
+    # alongside, immediately after the jni.h include that brings them in.
+    # Neither is used as a macro anywhere in hotspot.
+    if [ -f "$GD" ] && ! grep -q '^#undef interface$' "$GD"; then
+      # 8 spells the include "prims/jni.h"; keep whichever form is there.
+      perl -0pi -e 's/^(#include "(?:prims\/)?jni\.h")$/$1\n\n#ifdef __MINGW32__\n\/\/ <windows.h>, reached through jni.h, defines these as macros; hotspot uses\n\/\/ them as identifiers.\n#undef interface\n#undef small\n#endif/m' "$GD"
+      log "Undefining the windows.h identifier macros (interface, small)"
+    fi
+}
+
 # --- windows: source fixes ---------------------------------------------------
 # Everything the llvm-mingw cross build needs changed in the tree. Kept at the
 # indentation it had in build.sh's platform case: five heredocs below would
@@ -2615,133 +2754,7 @@ PLEOF
       log "Including ${gc}Memory.inline.hpp in ${gc}VirtualMemory_windows.cpp"
     done
 
-    GD="$SRC/src/hotspot/share/utilities/globalDefinitions_gcc.hpp"
-    if [ -f "$GD" ] && grep -q '^#include <alloca.h>$' "$GD"; then
-      perl -0pi -e 's/^#include <alloca\.h>$/#ifdef __MINGW32__\n#include <malloc.h>\n#else\n#include <alloca.h>\n#endif/m' "$GD"
-      log "Taking alloca from <malloc.h> in globalDefinitions_gcc.hpp"
-    fi
-    if [ -f "$GD" ] && grep -q '^#include <dlfcn.h>$' "$GD"; then
-      perl -0pi -e 's/^#include <dlfcn\.h>\n#include <pthread\.h>$/#ifndef __MINGW32__\n#include <dlfcn.h>\n#include <pthread.h>\n#endif/m' "$GD"
-      grep -q '^#ifndef __MINGW32__$' "$GD" || {
-        echo "failed to guard the unix-only headers in globalDefinitions_gcc.hpp" >&2; exit 1; }
-      log "Skipping <dlfcn.h> and <pthread.h> in globalDefinitions_gcc.hpp"
-    fi
-
-    # Same header, further down: g_isnan is defined per platform for apple,
-    # linux, the BSDs and aix, and anything else gets
-    #   error: "missing platform-specific definition here"
-    # because windows is expected to have taken globalDefinitions_visCPP.hpp.
-    # isnan behaves the same on mingw, so mingw joins the linux branch. Only the
-    # #elif is touched, the #if above it pulls in ucontext.h and friends, which
-    # mingw genuinely lacks and must keep skipping.
-    # 21 spells that branch without _AIX (aix has its own header there), so the
-    # _AIX half is optional in the pattern; matching only 25's spelling made this
-    # a silent no-op on 21 and left the #error standing.
-    if [ -f "$GD" ] && grep -q '^#error "missing platform-specific definition here"$' "$GD"; then
-      perl -0pi -e 's/^#elif defined\(LINUX\) \|\| defined\(_ALLBSD_SOURCE\)( \|\| defined\(_AIX\))?$/#elif defined(LINUX) || defined(_ALLBSD_SOURCE)$1 || defined(__MINGW32__)/m' "$GD"
-      grep -q '^#elif defined(LINUX) || defined(_ALLBSD_SOURCE).* || defined(__MINGW32__)$' "$GD" || {
-        echo "failed to give mingw the g_isnan definitions in globalDefinitions_gcc.hpp" >&2; exit 1; }
-      log "Giving mingw the linux g_isnan definitions"
-    fi
-
-    # Same header, the include block: 21 puts <inttypes.h> inside the
-    # "#if defined(LINUX) || defined(_ALLBSD_SOURCE)" group, so PRIxPTR is never
-    # defined on a windows target, globalDefinitions.hpp builds PTR_FORMAT and
-    # INTPTR_FORMAT out of it, and every use of either becomes a bare identifier:
-    #   growableArray.hpp:334: error: expected ')'
-    #   array.hpp:152: error: expected ')'
-    # 25 hoisted <inttypes.h> and <stdint.h> out to the top for everyone; give
-    # mingw the same two rather than joining the linux branch, which also pulls
-    # in <ucontext.h> and <sys/time.h> that mingw has no use for.
-    # The test is where the include sits, not whether it is there: on 21 the only
-    # <inttypes.h> is below the "#if defined(LINUX)" line, on 25 it is above it
-    # and this must do nothing.
-    if [ -f "$GD" ] && grep -q '^#include <errno.h>$' "$GD"; then
-      gd_inttypes=$(grep -n '^#include <inttypes.h>$' "$GD" | head -n1 | cut -d: -f1)
-      gd_linux=$(grep -n '^#if defined(LINUX)' "$GD" | head -n1 | cut -d: -f1)
-      if [ -n "$gd_linux" ] && { [ -z "$gd_inttypes" ] || [ "$gd_inttypes" -gt "$gd_linux" ]; }; then
-        perl -0pi -e 's/^#include <errno\.h>$/#include <errno.h>\n\n#ifdef __MINGW32__\n\/\/ 21 includes these only for linux and the BSDs; PRIxPTR, and so PTR_FORMAT,\n\/\/ is needed everywhere.\n#include <stdint.h>\n#include <inttypes.h>\n#endif/m' "$GD"
-        grep -q '^\/\/ is needed everywhere\.$' "$GD" || {
-          echo "failed to add <inttypes.h> for mingw in globalDefinitions_gcc.hpp" >&2; exit 1; }
-        log "Including <inttypes.h> on mingw, for PRIxPTR"
-      fi
-    fi
-
-    # Same header again, 21 and older only: everything that is neither linux nor
-    # a BSD gets a block of hand-written "compiler-specific primitive types"
-    # (uint16_t, uint32_t, uint64_t, intptr_t, uintptr_t) left over from the
-    # Solaris/Studio days, and it assumes ILP32:
-    #   globalDefinitions_gcc.hpp:105: error: typedef redefinition with
-    #   different types ('int' vs 'long long')
-    # against mingw's own corecrt.h. mingw has a complete <stdint.h>, so the
-    # whole block is dead weight there; exclude it the same way linux is. 25
-    # deleted the block outright, so this finds nothing there.
-    if [ -f "$GD" ] && grep -q '^#if !defined(LINUX) && !defined(_ALLBSD_SOURCE)$' "$GD"; then
-      perl -0pi -e 's/^#if !defined\(LINUX\) && !defined\(_ALLBSD_SOURCE\)$/#if !defined(LINUX) \&\& !defined(_ALLBSD_SOURCE) \&\& !defined(__MINGW32__)/m' "$GD"
-      grep -q '^#if !defined(LINUX) && !defined(_ALLBSD_SOURCE) && !defined(__MINGW32__)$' "$GD" || {
-        echo "failed to exclude the legacy primitive typedefs in globalDefinitions_gcc.hpp" >&2; exit 1; }
-      log "Skipping the pre-stdint primitive typedefs on mingw"
-    fi
-
-    # Same header, the <math.h> include: mingw follows MSVC in hiding M_PI and
-    # the other math constants behind _USE_MATH_DEFINES, while glibc defines them
-    # unconditionally, so the gcc header never asks for them and 21's parallel GC
-    # does not get them:
-    #   psParallelCompact.cpp:917: error: use of undeclared identifier 'M_PI'
-    # globalDefinitions_visCPP.hpp defines _USE_MATH_DEFINES right before its own
-    # <math.h> for exactly this reason; do the same on mingw. It lands on 25 as
-    # well, where nothing in hotspot uses M_PI any more; it only makes the
-    # constants available, so that is a no-op in effect rather than by guard.
-    if [ -f "$GD" ] && grep -q '^#include <math.h>$' "$GD" &&
-       ! grep -q '_USE_MATH_DEFINES' "$GD"; then
-      perl -0pi -e 's/^#include <math\.h>$/#ifdef __MINGW32__\n\/\/ mingw hides M_PI and friends behind this, as MSVC does; see\n\/\/ globalDefinitions_visCPP.hpp, which defines it for the same reason.\n#define _USE_MATH_DEFINES\n#endif\n#include <math.h>/m' "$GD"
-      grep -q '^#define _USE_MATH_DEFINES$' "$GD" || {
-        echo "failed to define _USE_MATH_DEFINES for mingw in globalDefinitions_gcc.hpp" >&2; exit 1; }
-      log "Asking for the math constants (M_PI) on mingw"
-    fi
-
-    # Same header, both LP64 branches: 21 reads _LP64 as "long is 64 bits", which
-    # holds for every unix it targets but not for win64, where long stays 32 bits
-    # and intptr_t is long long. Two macros come out wrong there, and 25 deleted
-    # both, so this whole block is 21-and-older only.
-    #
-    #   NULL_WORD is 0L under _LP64. LIR_OprFact::intptrConst is overloaded on
-    #   void* and intptr_t; on linux 0L matches intptr_t exactly and wins, on
-    #   mingw it matches neither exactly:
-    #     g1BarrierSetC1.cpp:172: error: call to 'intptrConst' is ambiguous
-    #   The !_LP64 branch right below already spells the portable form, for the
-    #   same reason (macos, where intptr_t is not int32_t), take that branch.
-    if [ -f "$GD" ] && grep -q '^    #define NULL_WORD  0L$' "$GD"; then
-      perl -0pi -e 's/^  #ifdef _LP64\n    #define NULL_WORD  0L$/  #if defined(_LP64) \&\& !defined(__MINGW32__)\n    #define NULL_WORD  0L/m' "$GD"
-      grep -q '^  #if defined(_LP64) && !defined(__MINGW32__)$' "$GD" || {
-        echo "failed to give mingw the portable NULL_WORD" >&2; exit 1; }
-      log "Taking the intptr_t-cast NULL_WORD on mingw, not 0L"
-    fi
-    #   FORMAT64_MODIFIER is "l" under _LP64 except on apple, so every jlong
-    #   printed through it would go through a 32-bit conversion on win64. mingw
-    #   wants "ll" for the same reason apple does.
-    if [ -f "$GD" ] && grep -q '^# define FORMAT64_MODIFIER "l"$' "$GD"; then
-      perl -0pi -e 's/^# ifdef __APPLE__\n# define FORMAT64_MODIFIER "ll"$/# if defined(__APPLE__) || defined(__MINGW32__)\n# define FORMAT64_MODIFIER "ll"/m' "$GD"
-      grep -q '^# if defined(__APPLE__) || defined(__MINGW32__)$' "$GD" || {
-        echo "failed to give mingw the ll FORMAT64_MODIFIER" >&2; exit 1; }
-      log "Formatting 64-bit values with ll on mingw, as long is 32 bits there"
-    fi
-
-    # jni.h reaches jvm_md.h, which includes <windows.h>, which defines
-    # "interface" as a macro for struct. hotspot uses it as an ordinary
-    # identifier, opto/type.hpp declares a bool parameter called interface,
-    # so the declaration turns into "bool struct" and every call to it then has
-    # one argument too many:
-    #   type.hpp:958: error: declaration of anonymous struct must be a definition
-    #   type.hpp:1332: error: too many arguments to function call, expected 4, have 5
-    # MSVC's windows.h defers that definition to the COM headers, which hotspot
-    # never pulls in; mingw's defines it up front. Undefine it, and "small"
-    # alongside, immediately after the jni.h include that brings them in.
-    # Neither is used as a macro anywhere in hotspot.
-    if [ -f "$GD" ] && ! grep -q '^#undef interface$' "$GD"; then
-      perl -0pi -e 's/^#include "jni\.h"$/#include "jni.h"\n\n#ifdef __MINGW32__\n\/\/ <windows.h>, reached through jni.h, defines these as macros; hotspot uses\n\/\/ them as identifiers.\n#undef interface\n#undef small\n#endif/m' "$GD"
-      log "Undefining the windows.h identifier macros (interface, small)"
-    fi
+    fix_globaldefinitions_gcc "$SRC/src/hotspot/share/utilities/globalDefinitions_gcc.hpp"
 
     # hotspot poisons sprintf/vsprintf/vsnprintf by redeclaring them extern "C".
     # mingw's stdio.h declares its own ANSI-stdio versions with C++ linkage, so
@@ -3264,6 +3277,8 @@ fi
 # 8's hotspot has os_cpu/windows_x86 and nothing else: no cpu/arm at all, and
 # no windows_aarch64. x86_64 is the only triple this can serve.
 if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ] && [ "${TARGET%%-*}" = x86_64 ]; then
+  # 8's copy of the header is the same shape as 21's, so the same edits apply.
+  fix_globaldefinitions_gcc "$SRC/hotspot/src/share/vm/utilities/globalDefinitions_gcc.hpp"
   HSL="$SRC/hotspot/make/linux"
   python3 - "$HSL" <<'PY'
 import re, sys
