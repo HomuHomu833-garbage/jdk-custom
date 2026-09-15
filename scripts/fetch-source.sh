@@ -3279,6 +3279,21 @@ fi
 if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ] && [ "${TARGET%%-*}" = x86_64 ]; then
   # 8's copy of the header is the same shape as 21's, so the same edits apply.
   fix_globaldefinitions_gcc "$SRC/hotspot/src/share/vm/utilities/globalDefinitions_gcc.hpp"
+  # One difference: the branch mingw now shares with linux calls isnanf for the
+  # float overload, which is a glibc extension mingw does not have:
+  #   globalDefinitions_gcc.hpp:259: error: use of undeclared identifier 'isnanf'
+  # isnan is overloaded for float in C++, and is what the later releases settled
+  # on here. Address the line under that branch rather than the text, which
+  # appears again under SOLARIS.
+  GD8="$SRC/hotspot/src/share/vm/utilities/globalDefinitions_gcc.hpp"
+  gd_elif=$(grep -n '^#elif defined(LINUX).*__MINGW32__)$' "$GD8" | head -n1 | cut -d: -f1)
+  [ -n "$gd_elif" ] || { echo "no mingw g_isnan branch in $GD8" >&2; exit 1; }
+  if sed -n "$((gd_elif + 1))p" "$GD8" | grep -q 'isnanf'; then
+    sed -i "$((gd_elif + 1))s/isnanf/isnan/" "$GD8"
+    sed -n "$((gd_elif + 1))p" "$GD8" | grep -q 'return isnan(f)' || {
+      echo "failed to replace isnanf in the mingw g_isnan branch" >&2; exit 1; }
+    log "Using isnan rather than glibc's isnanf on mingw"
+  fi
   HSL="$SRC/hotspot/make/linux"
   python3 - "$HSL" <<'PY'
 import re, sys
@@ -3339,6 +3354,17 @@ edits = [
      "CXXFLAGS = $(SYSDEFS) $(INCLUDES)",
      "CXXFLAGS = $(filter-out -DWINDOWS -D_WINDOWS,$(SYSDEFS)) -DLINUX $(INCLUDES)",
      "the adlc host defines"),
+    # buildtree.make writes the source and include directory lists, and builds
+    # them from OS_FAMILY, which is the build host's. vm.make's own SOURCE_PATHS
+    # were corrected above, but these were still linux, so the compile ran with
+    # os/linux/vm on -I and could not find hotspot's own header:
+    #   prims/jvm.h:36: fatal error: 'jvm_windows.h' file not found
+    # Both lists carry the same six lines. OS_FAMILY stays the build host's
+    # everywhere else in this file, where it selects makefiles.
+    ("makefiles/buildtree.make",
+     '\techo "$(call gamma-path,altsrc,os_cpu/$(OS_FAMILY)_$(SRCARCH)/vm) \\\\"; \\\n\techo "$(call gamma-path,commonsrc,os_cpu/$(OS_FAMILY)_$(SRCARCH)/vm) \\\\"; \\\n\techo "$(call gamma-path,altsrc,os/$(OS_FAMILY)/vm) \\\\"; \\\n\techo "$(call gamma-path,commonsrc,os/$(OS_FAMILY)/vm) \\\\"; \\\n\techo "$(call gamma-path,altsrc,os/posix/vm) \\\\"; \\\n\techo "$(call gamma-path,commonsrc,os/posix/vm)"; \\',
+     '\techo "$(call gamma-path,altsrc,os_cpu/windows_$(SRCARCH)/vm) \\\\"; \\\n\techo "$(call gamma-path,commonsrc,os_cpu/windows_$(SRCARCH)/vm) \\\\"; \\\n\techo "$(call gamma-path,altsrc,os/windows/vm) \\\\"; \\\n\techo "$(call gamma-path,commonsrc,os/windows/vm)"; \\',
+     "the source and include directories", 2),
     # os/posix is added unconditionally, being true of every OS the GNU-make
     # build served. windows is the exception.
     ("makefiles/vm.make",
@@ -3378,14 +3404,16 @@ else:
     open(p, 'w', encoding='utf-8', newline='').write(platform)
     print("platform file: pointed at the windows sources")
 
-for name, old, new, what in edits:
+for edit in edits:
+    name, old, new, what = edit[:4]
+    want = edit[4] if len(edit) > 4 else 1
     f = f"{hsl}/{name}"
     s = open(f, encoding='utf-8', errors='surrogateescape').read()
     if s.count(old) == 0 and (new == "" or s.count(new) >= 1):
         print(f"{name}: {what} already fixed")
         continue
-    if s.count(old) != 1:
-        sys.exit(f"{name}: {what} matched {s.count(old)} times, expected 1")
+    if s.count(old) != want:
+        sys.exit(f"{name}: {what} matched {s.count(old)} times, expected {want}")
     open(f, 'w', encoding='utf-8', errors='surrogateescape', newline='').write(
         s.replace(old, new))
     print(f"{name}: fixed {what}")
