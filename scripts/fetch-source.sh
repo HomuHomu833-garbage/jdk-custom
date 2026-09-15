@@ -323,6 +323,38 @@ fix_globaldefinitions_gcc() {
     fi
 }
 
+# --- jdk.pack's one-argument mkdir on windows ------------------------------
+# Shared by 11 and 8, whose trees put the header in different places; 14
+# deleted jdk.pack altogether.
+fix_jdk_pack_mkdir() {
+    PACKDEF="$1"
+    # jdk.pack keys its whole windows block on _MSC_VER, so mingw takes the unix
+    # branch and gets the two-argument mkdir:
+    #   utils.cpp:75: error: no matching function for call to 'mkdir'
+    # Only MKDIR is touched. The rest of that branch (PATH_MAX, strcasecmp,
+    # dup2) is fine on mingw, while the MSVC side spells things mingw would have
+    # to be checked for one by one. 14 deleted jdk.pack, so this is 11 and 8.
+    # The two-argument define survives inside the guard below, so test for the
+    # guard's own one-argument line, which the MSVC branch spells with padding.
+    if [ -f "$PACKDEF" ] && grep -q '^#define MKDIR(dir) mkdir(dir, 0777);$' "$PACKDEF" &&
+       ! grep -q '^#define MKDIR(dir) mkdir(dir)$' "$PACKDEF"; then
+      awk '
+        $0 == "#define MKDIR(dir) mkdir(dir, 0777);" {
+          print "#ifdef _WIN32"
+          print "#define MKDIR(dir) mkdir(dir)"
+          print "#else"
+          print $0
+          print "#endif"
+          next
+        }
+        { print }
+      ' "$PACKDEF" > "$PACKDEF.tmp" && mv "$PACKDEF.tmp" "$PACKDEF"
+      grep -q '^#define MKDIR(dir) mkdir(dir)$' "$PACKDEF" || {
+        echo "failed to give jdk.pack the one-argument mkdir" >&2; exit 1; }
+      log "Using the one-argument mkdir in jdk.pack"
+    fi
+}
+
 # --- windows: source fixes ---------------------------------------------------
 # Everything the llvm-mingw cross build needs changed in the tree. Kept at the
 # indentation it had in build.sh's platform case: five heredocs below would
@@ -1938,29 +1970,7 @@ PYEOF
       log "Running the manifest tool only for the microsoft toolchain"
     fi
 
-    # jdk.pack keys its whole windows block on _MSC_VER, so mingw takes the unix
-    # branch and gets the two-argument mkdir:
-    #   utils.cpp:75: error: no matching function for call to 'mkdir'
-    # Only MKDIR is touched. The rest of that branch (PATH_MAX, strcasecmp,
-    # dup2) is fine on mingw, while the MSVC side spells things mingw would have
-    # to be checked for one by one. 14 deleted jdk.pack, so this is 11 and 8.
-    PACKDEF="$SRC/src/jdk.pack/share/native/common-unpack/defines.h"
-    if [ -f "$PACKDEF" ] && grep -q '^#define MKDIR(dir) mkdir(dir, 0777);$' "$PACKDEF"; then
-      awk '
-        $0 == "#define MKDIR(dir) mkdir(dir, 0777);" {
-          print "#ifdef _WIN32"
-          print "#define MKDIR(dir) mkdir(dir)"
-          print "#else"
-          print $0
-          print "#endif"
-          next
-        }
-        { print }
-      ' "$PACKDEF" > "$PACKDEF.tmp" && mv "$PACKDEF.tmp" "$PACKDEF"
-      grep -q '^#define MKDIR(dir) mkdir(dir)$' "$PACKDEF" || {
-        echo "failed to give jdk.pack the one-argument mkdir" >&2; exit 1; }
-      log "Using the one-argument mkdir in jdk.pack"
-    fi
+    fix_jdk_pack_mkdir "$SRC/src/jdk.pack/share/native/common-unpack/defines.h"
 
     # AccessBridgeStatusWindow is spelled .RC on disk, .rc by the three library
     # makefiles and .RC again by the launcher one, which only resolves on a
@@ -3353,6 +3363,9 @@ if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ] && [ "${TARGET%%-*}" 
     "$SRC/hotspot/src/os/windows/vm" || {
       echo "no bare _MSC_VER version tests found in hotspot's windows sources" >&2; exit 1; }
   [ "$msc_fixed" -gt 0 ] && log "Guarding $msc_fixed windows source files against an undefined _MSC_VER"
+
+  # 8 keeps jdk.pack under the old source layout, but the header is the same.
+  fix_jdk_pack_mkdir "$SRC/jdk/src/share/native/com/sun/java/util/jar/pack/defines.h"
 
   # Throwable.c declares fillInStackTrace's third parameter as int, while the
   # generated header says jint. On unix those are the same type; the windows
