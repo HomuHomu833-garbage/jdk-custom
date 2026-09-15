@@ -3294,6 +3294,40 @@ if [ "${PLATFORM:-}" = windows ] && [ "$JDK_VERSION" = 8 ] && [ "${TARGET%%-*}" 
       echo "failed to replace isnanf in the mingw g_isnan branch" >&2; exit 1; }
     log "Using isnan rather than glibc's isnanf on mingw"
   fi
+
+  # os/windows and os_cpu/windows_x86 were written for Visual Studio and test
+  # _MSC_VER without asking whether it is defined. Under clang it is not, so
+  # every such test reads 0 and takes the oldest branch: jvm_windows.h hand-rolls
+  # MODULEINFO instead of including <Psapi.h>, and os_windows.hpp turns on
+  # JDK6_OR_EARLIER, a VS2008-and-older path. Ask for the macro first, which
+  # leaves a real Visual Studio build on exactly the branch it had.
+  msc_fixed=0
+  for f in "$SRC/hotspot/src/os/windows/vm/"*.hpp "$SRC/hotspot/src/os/windows/vm/"*.h \
+           "$SRC/hotspot/src/os/windows/vm/"*.cpp \
+           "$SRC/hotspot/src/os_cpu/windows_x86/vm/"*.hpp \
+           "$SRC/hotspot/src/os_cpu/windows_x86/vm/"*.cpp; do
+    [ -f "$f" ] || continue
+    grep -qE '^#if _MSC_VER' "$f" || continue
+    perl -pi -e 's/^#if _MSC_VER /#if defined(_MSC_VER) \&\& _MSC_VER /' "$f"
+    msc_fixed=$((msc_fixed + 1))
+  done
+  [ "$msc_fixed" -gt 0 ] || grep -rqE '^#if defined\(_MSC_VER\) && _MSC_VER ' \
+    "$SRC/hotspot/src/os/windows/vm" || {
+      echo "no bare _MSC_VER version tests found in hotspot's windows sources" >&2; exit 1; }
+  [ "$msc_fixed" -gt 0 ] && log "Guarding $msc_fixed windows source files against an undefined _MSC_VER"
+
+  # os_windows.hpp declares WinSock2Dll in terms of LPWSADATA without including
+  # anything: under MSVC <windows.h> drags in <winsock.h>, but this build passes
+  # WIN32_LEAN_AND_MEAN, which is exactly what that suppresses.
+  #   os_windows.hpp:174: error: unknown type name 'LPWSADATA'
+  JVMW="$SRC/hotspot/src/os/windows/vm/jvm_windows.h"
+  if ! grep -q '^#include <winsock2.h>$' "$JVMW"; then
+    perl -pi -e 's/^#include <windows\.h>$/#include <windows.h>\n\/\/ WIN32_LEAN_AND_MEAN keeps windows.h from reaching winsock; hotspot needs it.\n#include <winsock2.h>/' "$JVMW"
+    grep -q '^#include <winsock2.h>$' "$JVMW" || {
+      echo "failed to include <winsock2.h> in jvm_windows.h" >&2; exit 1; }
+    log "Including <winsock2.h> for hotspot's WinSock2Dll"
+  fi
+
   HSL="$SRC/hotspot/make/linux"
   python3 - "$HSL" <<'PY'
 import re, sys
