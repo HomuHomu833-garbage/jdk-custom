@@ -20,6 +20,8 @@ jobs:
       platform: linux
       jdk_version: ${{ inputs.jdk_version }}
       # powerpc64le-linux-gnu, x86_64-linux-gnux32
+      # broken: mips64-linux-gnuabin32, mips64-linux-muslabin32, mips64el-linux-gnuabin32,
+      #   mips64el-linux-muslabin32
       targets: >-
         ["aarch64-linux-musl", "aarch64-linux-gnu", "aarch64_be-linux-gnu",
          "aarch64_be-linux-musl", "arm-linux-gnueabi", "arm-linux-gnueabihf",
