@@ -1,0 +1,138 @@
+aarch64: widen pointer constants and synchronize C2 call return offsets
+
+Combines the former 0019 movptr change and 0022 C2 return-PC correction.
+The code changes are retained together: emitting a longer sequence without
+updating the return-PC metadata breaks OopMap and debug-scope lookup.
+
+movptr() used three instructions and dropped everything above bit 47, which
+on Android includes the top-byte heap-pointer tag.  Emit a fourth instruction
+and update the constant reader, patcher and NativeMovConstReg::instruction_size
+to 16 bytes.
+
+The dynamic Java call returns after movptr plus BL: 16 + 4 = 20 bytes.
+The external runtime call returns after ADR, movptr, STP and BLR:
+4 + 16 + 4 + 4 = 28 bytes.  Express both offsets using the sequence-size
+constant instead of the old 16/24-byte literals.  A generated-code runtime
+call site remains one BL in both near and far trampoline modes, so its return
+offset is always one instruction; far mode only changes the out-of-line target.
+
+Apply after 0017/0018, then apply 0020 for the fixed stub layouts and 0021
+for the existing conditional fourth-word handling.  This patch alone is not
+the complete layout migration.
+
+Built and run on device with the rest of this series: java -version reports
+mixed mode, javac H.java finishes in 0.19s at 251% CPU, java H prints ok and
+a -Xmx16m run performs four young collections. A single javac timing is a
+sample, not a benchmark or a proof of coverage.
+
+diff --git a/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp b/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp
+--- a/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp
++++ b/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp
+@@ -155,11 +155,13 @@
+     // Move wide constant
+     assert(nativeInstruction_at(branch+4)->is_movk(), "wrong insns in patch");
+     assert(nativeInstruction_at(branch+8)->is_movk(), "wrong insns in patch");
++    assert(nativeInstruction_at(branch+12)->is_movk(), "wrong insns in patch");
+     Instruction_aarch64::patch(branch, 20, 5, dest & 0xffff);
+     Instruction_aarch64::patch(branch+4, 20, 5, (dest >>= 16) & 0xffff);
+     Instruction_aarch64::patch(branch+8, 20, 5, (dest >>= 16) & 0xffff);
++    Instruction_aarch64::patch(branch+12, 20, 5, (dest >>= 16) & 0xffff);
+     assert(target_addr_for_insn(branch) == target, "should be");
+-    instructions = 3;
++    instructions = 4;
+   } else if (Instruction_aarch64::extract(insn, 31, 22) == 0b1011100101 &&
+              Instruction_aarch64::extract(insn, 4, 0) == 0b11111) {
+     // nothing to do
+@@ -265,12 +267,14 @@
+     }
+   } else if (Instruction_aarch64::extract(insn, 31, 23) == 0b110100101) {
+     u_int32_t *insns = (u_int32_t *)insn_addr;
+-    // Move wide constant: movz, movk, movk.  See movptr().
++    // Move wide constant: movz followed by movk slots.  See movptr().
+     assert(nativeInstruction_at(insns+1)->is_movk(), "wrong insns in patch");
+     assert(nativeInstruction_at(insns+2)->is_movk(), "wrong insns in patch");
++    assert(nativeInstruction_at(insns+3)->is_movk(), "wrong insns in patch");
+     return address(u_int64_t(Instruction_aarch64::extract(insns[0], 20, 5))
+                    + (u_int64_t(Instruction_aarch64::extract(insns[1], 20, 5)) << 16)
+-                   + (u_int64_t(Instruction_aarch64::extract(insns[2], 20, 5)) << 32));
++                   + (u_int64_t(Instruction_aarch64::extract(insns[2], 20, 5)) << 32)
++                   + (u_int64_t(Instruction_aarch64::extract(insns[3], 20, 5)) << 48));
+   } else if (Instruction_aarch64::extract(insn, 31, 22) == 0b1011100101 &&
+              Instruction_aarch64::extract(insn, 4, 0) == 0b11111) {
+     return 0;
+@@ -1433,10 +1437,10 @@
+   movptr(r, imm64);
+ }
+ 
+-// Move a constant pointer into r.  In AArch64 mode the virtual
+-// address space is 48 bits in size, so we only need three
+-// instructions to create a patchable instruction sequence that can
+-// reach anywhere.
++// Move a constant pointer into r.  A 48-bit address space would need only
++// three instructions, but android tags heap pointers in the top byte, so the
++// sequence has to carry all 64 bits: the value is read back out of the code
++// by target_addr_for_insn(), and a lost tag makes free() abort in Scudo.
+ void MacroAssembler::movptr(Register r, uintptr_t imm64) {
+ #ifndef PRODUCT
+   {
+@@ -1445,12 +1449,14 @@
+     block_comment(buffer);
+   }
+ #endif
+-  assert(imm64 < (1ul << 48), "48-bit overflow in address constant");
++  // No 48-bit bound check: a TBI tag lives above that.
+   movz(r, imm64 & 0xffff);
+   imm64 >>= 16;
+   movk(r, imm64 & 0xffff, 16);
+   imm64 >>= 16;
+   movk(r, imm64 & 0xffff, 32);
++  imm64 >>= 16;
++  movk(r, imm64 & 0xffff, 48);
+ }
+ 
+ // Macro to mov replicated immediate to vector register.
+diff --git a/hotspot/src/cpu/aarch64/vm/nativeInst_aarch64.hpp b/hotspot/src/cpu/aarch64/vm/nativeInst_aarch64.hpp
+--- a/hotspot/src/cpu/aarch64/vm/nativeInst_aarch64.hpp
++++ b/hotspot/src/cpu/aarch64/vm/nativeInst_aarch64.hpp
+@@ -205,7 +205,7 @@
+ class NativeMovConstReg: public NativeInstruction {
+  public:
+   enum Aarch64_specific_constants {
+-    instruction_size            =    3 * 4, // movz, movk, movk.  See movptr().
++    instruction_size            =    4 * 4, // movz, movk, movk, movk.  See movptr().
+     instruction_offset          =    0,
+     displacement_offset         =    0,
+   };
+diff --git a/hotspot/src/cpu/aarch64/vm/aarch64.ad b/hotspot/src/cpu/aarch64/vm/aarch64.ad
+--- a/hotspot/src/cpu/aarch64/vm/aarch64.ad
++++ b/hotspot/src/cpu/aarch64/vm/aarch64.ad
+@@ -1389,13 +1389,14 @@
+ 
+ int MachCallDynamicJavaNode::ret_addr_offset()
+ {
+-  return 16; // movz, movk, movk, bl
++  // movz, movk, movk, movk, bl.
++  return NativeMovConstReg::instruction_size + NativeInstruction::instruction_size;
+ }
+ 
+ int MachCallRuntimeNode::ret_addr_offset() {
+   // for generated stubs the call will be
+   //   bl(addr)
+-  // for real runtime callouts it will be six instructions
++  // for real runtime callouts it will be seven instructions
+   // see aarch64_enc_java_to_runtime
+   //   adr(rscratch2, retaddr)
+   //   lea(rscratch1, RuntimeAddress(addr)
+@@ -1403,9 +1404,10 @@
+   //   blr(rscratch1)
+   CodeBlob *cb = CodeCache::find_blob(_entry_point);
+   if (cb) {
+-    return MacroAssembler::far_branch_size();
++    // trampoline_call() emits one BL at the call site in both near and far modes.
++    return NativeInstruction::instruction_size;
+   } else {
+-    return 6 * NativeInstruction::instruction_size;
++    return NativeMovConstReg::instruction_size + 3 * NativeInstruction::instruction_size;
+   }
+ }
+ 

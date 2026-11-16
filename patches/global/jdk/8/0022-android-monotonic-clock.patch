@@ -1,0 +1,49 @@
+android: use the monotonic clock from libc instead of dlopen'ing librt
+
+os::Linux::clock_init() resolves clock_gettime()/clock_getres() through
+dlopen("librt.so.1"), falling back to dlopen("librt.so"). Neither name
+resolves on bionic, where both functions live in libc, so the lookup always
+failed: the VM stayed on gettimeofday() and printed
+
+  No monotonic clock was available - timed services may be adversely
+  affected if the time-of-day clock changes
+
+on stderr for every process it started. That warning is the first line of
+`java -version 2>&1`, while common/autoconf/boot-jdk.m4 takes head -n1 of
+exactly that output to decide the boot JDK version, so a JDK built from this
+tree could not even be used as its own boot JDK. Command-line tools that
+parse `java -version` are affected the same way.
+
+bionic exposes both through libc at the API level this port targets, so on
+Android call them directly and keep the dlopen path for glibc.
+
+diff --git a/hotspot/src/os/linux/vm/os_linux.cpp b/hotspot/src/os/linux/vm/os_linux.cpp
+--- a/hotspot/src/os/linux/vm/os_linux.cpp
++++ b/hotspot/src/os/linux/vm/os_linux.cpp
+@@ -1404,6 +1404,18 @@
+ #endif
+ 
+ void os::Linux::clock_init() {
++#ifdef __ANDROID__
++  // bionic resolves clock_gettime() and clock_getres() through libc and has
++  // no librt.so.1 to dlopen, so the lookup below always fails here and the VM
++  // falls back to gettimeofday(), warning about it on every single run.
++  struct timespec res;
++  struct timespec tp;
++  if (::clock_getres(CLOCK_MONOTONIC, &res) == 0 &&
++      ::clock_gettime(CLOCK_MONOTONIC, &tp)  == 0) {
++    _clock_gettime = ::clock_gettime;
++    return;
++  }
++#else
+   // we do dlopen's in this particular order due to bug in linux
+   // dynamical loader (see 6348968) leading to crash on exit
+   void* handle = dlopen("librt.so.1", RTLD_LAZY);
+@@ -1438,6 +1450,7 @@
+       }
+     }
+   }
++#endif
+   warning("No monotonic clock was available - timed services may " \
+           "be adversely affected if the time-of-day clock changes");
+ }

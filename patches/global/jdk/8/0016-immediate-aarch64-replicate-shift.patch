@@ -1,0 +1,42 @@
+immediate_aarch64: do not shift a u_int64_t by its own width
+
+replicate() shifts the accumulator left by nbits before or-ing the next
+copy in.  expandLogicalImmediate() calls it with nbits = 2 * (1 << i),
+which is 64 on the last iteration, so the shift count equals the width
+of u_int64_t -- undefined behaviour.  ones() already guards the same
+case for the mask; the shift never got the treatment.
+
+With the android Zero build this never showed up because cpu/aarch64 is
+not compiled there.  In the server build the optimiser is free to
+rewrite the loop, a batch of the 8192 entries in InverseLITable comes
+out wrong, qsort puts them in the wrong place, and bsearch then fails to
+find encodings that are actually representable -- encode_logical_immediate()
+returns 0xffffffff and Assembler::andr() dies on
+
+  guarantee(val < (1U << nbits)) failed: Field too big for insn
+
+in StubGenerator::generate_call_stub().  Compiled at -O0 the hardware
+shift makes the loop a no-op and the table is correct, which is what
+pinned this to the optimiser.
+
+Skip the shift when it would be by the full width. nbits == 64 is only
+reached with count == 1, so the result is unchanged and the undefined
+behaviour is gone.
+
+diff --git a/hotspot/src/cpu/aarch64/vm/immediate_aarch64.cpp b/hotspot/src/cpu/aarch64/vm/immediate_aarch64.cpp
+index 9f606ff..2fb2463 100644
+--- a/hotspot/src/cpu/aarch64/vm/immediate_aarch64.cpp
++++ b/hotspot/src/cpu/aarch64/vm/immediate_aarch64.cpp
+@@ -126,7 +126,11 @@ u_int64_t replicate(u_int64_t bits, int nbits, int count)
+   // nbits may be 64 in which case we want mask to be -1
+   u_int64_t mask = ones(nbits);
+   for (int i = 0; i < count ; i++) {
+-    result <<= nbits;
++    // nbits is 64 when replicating a 64-bit element; shifting by the width
++    // of the type is undefined and lets the optimiser rewrite this loop.
++    if (nbits < 64) {
++      result <<= nbits;
++    }
+     result |= (bits & mask);
+   }
+   return result;

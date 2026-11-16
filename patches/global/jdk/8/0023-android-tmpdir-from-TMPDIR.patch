@@ -1,0 +1,34 @@
+android: take java.io.tmpdir from TMPDIR
+
+java_props_md.c sets sprops.tmp_dir to P_tmpdir and only MacOSX gets a
+per-user directory; TMPDIR is not consulted on Linux, so java.io.tmpdir is
+always /tmp. On Android /tmp exists but belongs to the shell user (mode
+0771), so no application may write there and every File.createTempFile()
+fails with EACCES. That is what stops the build tools, e.g.
+
+  javax.imageio.IIOException: Can't create cache file!
+  Caused by: java.nio.file.AccessDeniedException: /tmp/imageio....tmp
+
+  at build.tools.icondata.awt.ToBin.main(ToBin.java:35)
+
+and it hits every program that needs a scratch file, so honour TMPDIR when
+it is set. When it is not set the behaviour is unchanged.
+
+diff --git a/jdk/src/solaris/native/java/lang/java_props_md.c b/jdk/src/solaris/native/java/lang/java_props_md.c
+--- a/jdk/src/solaris/native/java/lang/java_props_md.c
++++ b/jdk/src/solaris/native/java/lang/java_props_md.c
+@@ -395,6 +395,14 @@
+ 
+     /* tmp dir */
+     sprops.tmp_dir = P_tmpdir;
++#ifdef __ANDROID__
++    /* /tmp belongs to the shell user on Android, so it is not writable by
++     * an application; TMPDIR is where the environment says temp files go. */
++    v = getenv("TMPDIR");
++    if (v != NULL && v[0] != '\0') {
++        sprops.tmp_dir = v;
++    }
++#endif
+ #ifdef MACOSX
+     /* darwin has a per-user temp dir */
+     static char tmp_path[PATH_MAX];

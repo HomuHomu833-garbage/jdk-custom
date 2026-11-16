@@ -1,0 +1,57 @@
+aarch64: size fixed stubs and far call trampoline reservations
+
+The four-instruction movptr requires larger fixed interpreter-call and general-jump
+slots.  A far C2 call also emits an out-of-line trampoline containing LDR, BR and
+a 64-bit literal, so reserve 16 bytes and one relocation for it.  The near path
+has no trampoline.  The interpreter stub relocation estimate remains four: the
+extra movptr instruction changes code size, not relocation count.
+
+Apply after 0019 and before 0021.
+
+diff --git a/hotspot/src/cpu/aarch64/vm/compiledIC_aarch64.cpp b/hotspot/src/cpu/aarch64/vm/compiledIC_aarch64.cpp
+--- a/hotspot/src/cpu/aarch64/vm/compiledIC_aarch64.cpp
++++ b/hotspot/src/cpu/aarch64/vm/compiledIC_aarch64.cpp
+@@ -81,7 +81,7 @@
+ #undef __
+ 
+ int CompiledStaticCall::to_interp_stub_size() {
+-  return 7 * NativeInstruction::instruction_size;
++  return 9 * NativeInstruction::instruction_size;
+ }
+ 
+ // Relocation entries for call stub, compiled java to interpreter.
+diff --git a/hotspot/src/cpu/aarch64/vm/nativeInst_aarch64.hpp b/hotspot/src/cpu/aarch64/vm/nativeInst_aarch64.hpp
+--- a/hotspot/src/cpu/aarch64/vm/nativeInst_aarch64.hpp
++++ b/hotspot/src/cpu/aarch64/vm/nativeInst_aarch64.hpp
+@@ -386,10 +386,10 @@
+ class NativeGeneralJump: public NativeJump {
+ public:
+   enum AArch64_specific_constants {
+-    instruction_size            =    4 * 4,
++    instruction_size            =    5 * 4,
+     instruction_offset          =    0,
+     data_offset                 =    0,
+-    next_instruction_offset     =    4 * 4
++    next_instruction_offset     =    5 * 4
+   };
+   static void insert_unconditional(address code_pos, address entry);
+   static void replace_mt_safe(address instr_addr, address code_buffer);
+diff --git a/hotspot/src/cpu/aarch64/vm/aarch64.ad b/hotspot/src/cpu/aarch64/vm/aarch64.ad
+--- a/hotspot/src/cpu/aarch64/vm/aarch64.ad
++++ b/hotspot/src/cpu/aarch64/vm/aarch64.ad
+@@ -936,12 +936,13 @@
+  public:
+   // Size of call trampoline stub.
+   static uint size_call_trampoline() {
+-    return 0; // no call trampolines on this platform
++    return MacroAssembler::far_branches()
++           ? 4 * NativeInstruction::instruction_size : 0;
+   }
+   
+   // number of relocations needed by a call trampoline stub
+   static uint reloc_call_trampoline() { 
+-    return 0; // no call trampolines on this platform
++    return MacroAssembler::far_branches() ? 1 : 0;
+   }
+ };
+ 
