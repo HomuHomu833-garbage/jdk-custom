@@ -1,0 +1,67 @@
+aarch64: keep 48-bit address immediates clear of the TBI tag
+
+On Android the runtime tags heap pointers in the top byte: ObjectMonitor and
+heap addresses show up as 0xb400007c…, and tagged_addr_ctrl is
+PR_TAGGED_ADDR_ENABLE.  Universe::heap()->top_addr() / end_addr() and the
+klass base are such pointers, as are the targets handed to the relocation
+patcher when a stub is copied into the code cache.
+
+Three places materialise bits 32..47 of such an address into a movk, whose
+immediate field is 16 bits, and pass the unmasked shift result:
+
+  movk(reg1, target >> 32, 32);                                     adrp()
+  movk(dst, ...narrow_klass_base() >> 32, 32);      decode_klass_not_null
+  Instruction_aarch64::patch(branch + 4, 20, 5, (uint64_t)target >> 32);
+                                                    pd_patch_instruction_size
+
+With a tag of 0xb4 the shift result is 0x…b40000xx, and the guarantee fires:
+
+  guarantee(val < (1U << nbits)) failed: Field too big for insn
+
+It first aborted VM startup in TemplateTable::_new -> eden_allocate (adrp),
+then again while the C1 compiler thread copied its runtime stubs
+(Runtime1::initialize -> CodeBuffer::relocate_code_to).  Both happen at -O0
+as well, so this is a porting defect, not an optimiser one.
+
+Mask to the bits the instruction can encode.  The address is 48-bit and the
+tag lives above it; the untagged value is the address the hardware uses, so
+the materialised pointer stays correct.
+
+This covers the three sites above. The movz/movk chains built by
+load_address() and mov_slow() are outside this change.
+
+diff --git a/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp b/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp
+index 93c99a8..fb8d75b 100644
+--- a/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp
++++ b/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp
+@@ -137,7 +137,8 @@ int MacroAssembler::pd_patch_instruction_size(address branch, address target) {
+                    Instruction_aarch64::extract(insn, 4, 0) ==
+                      Instruction_aarch64::extract(insn2, 4, 0)) {
+         // movk #imm16<<32
+-        Instruction_aarch64::patch(branch + 4, 20, 5, (uint64_t)target >> 32);
++        // movk takes bits 32..47 only; a TBI tag in the top byte must not reach it.
++        Instruction_aarch64::patch(branch + 4, 20, 5, ((uint64_t)target >> 32) & 0xffff);
+         long dest = ((long)target & 0xffffffffL) | ((long)branch & 0xffff00000000L);
+         long pc_page = (long)branch >> 12;
+         long adr_page = (long)dest >> 12;
+@@ -3419,7 +3420,8 @@ void  MacroAssembler::decode_klass_not_null(Register dst, Register src) {
+       && Universe::narrow_klass_shift() == 0) {
+     if (dst != src)
+       movw(dst, src);
+-    movk(dst, (uint64_t)Universe::narrow_klass_base() >> 32, 32);
++    // Same as adrp(): a tagged klass base would overflow movk's 16-bit field.
++    movk(dst, ((uint64_t)Universe::narrow_klass_base() >> 32) & 0xffff, 32);
+     return;
+   }
+ 
+@@ -4039,7 +4041,9 @@ void MacroAssembler::adrp(Register reg1, const Address &dest, unsigned long &byt
+       = (target & 0xffffffffUL) | ((unsigned long)pc() & 0xffff00000000UL);
+ 
+     _adrp(reg1, (address)adrp_target);
+-    movk(reg1, target >> 32, 32);
++    // The target may carry an Android TBI tag in the top byte, so target >> 32
++    // is wider than movk's 16-bit immediate; mask down to the address bits.
++    movk(reg1, (target >> 32) & 0xffff, 32);
+   }
+   byte_offset = (unsigned long)dest.target() & 0xfff;
+ }

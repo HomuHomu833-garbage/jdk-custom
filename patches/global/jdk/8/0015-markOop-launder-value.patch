@@ -1,0 +1,49 @@
+markOop: stop clang from assuming the mark word's tag bits are zero
+
+markOop is a tagged pseudo-pointer: the low three bits of the "pointer" are
+not address bits, they are the lock/biased pattern (locked_value = 0,
+unlocked_value = 1, monitor_value = 2, marked_value = 3).  value() casts
+this to uintptr_t to get at them.
+
+clang 16 and later assume that a pointer to markOopDesc is aligned to
+alignof(markOopDesc), so those bits are known to be zero and the tag tests
+fold away.  With the zero/bionic build the folding was visible directly:
+for a neutral mark word of 1, has_locker() returned true and is_neutral()
+returned false, which sent inflate() down the stack-locked path and made
+it dereference "1 & ~monitor_value" -- fault addr 0x1.  The same folding
+in DefNewGeneration::copy_to_survivor_space() produced a wild forwardee
+pointer on the first young GC.  Compiled at -O0 both paths are correct,
+which is what pinned it to the optimizer rather than to the sources.
+
+Launder the cast through an empty asm so the value stays opaque to the
+optimizer; the tag bits are then visible again in every inlined predicate
+and the whole VM can go back to being optimised.
+
+jdk 11 replaced markOop with a value-type mark word, which is the
+structural fix for the same problem; on jdk 8 the laundering above is the
+whole change.
+
+diff --git a/hotspot/src/share/vm/oops/markOop.hpp b/hotspot/src/share/vm/oops/markOop.hpp
+index 649217c..ccb1dd4 100644
+--- a/hotspot/src/share/vm/oops/markOop.hpp
++++ b/hotspot/src/share/vm/oops/markOop.hpp
+@@ -104,7 +104,18 @@ class JavaThread;
+ class markOopDesc: public oopDesc {
+  private:
+   // Conversion
+-  uintptr_t value() const { return (uintptr_t) this; }
++  // markOop is a tagged pseudo-pointer whose low three
++  // bits carry the lock/biased pattern, but clang 16+ assumes a pointer to this
++  // class is aligned to alignof(markOopDesc) and folds the tag tests in
++  // has_locker(), is_neutral(), has_monitor() and has_displaced_mark_helper() as if
++  // those bits were always zero (observed: a neutral mark word of 1 made
++  // has_locker() true and is_neutral() false in the android Zero build).
++  // Launder the value through an empty asm so the low bits stay visible.
++  uintptr_t value() const {
++    uintptr_t v = (uintptr_t) this;
++    __asm__ __volatile__ ("" : "+r" (v));
++    return v;
++  }
+ 
+  public:
+   // Constants

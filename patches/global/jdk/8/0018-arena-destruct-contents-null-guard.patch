@@ -1,0 +1,53 @@
+Arena: tolerate an already emptied arena in destruct_contents()
+
+move_contents() empties the arena it moves out of:
+
+  Arena *Arena::move_contents(Arena *copy) {
+    copy->destruct_contents();
+    copy->_first = _first;
+    ...
+    reset();                      // _first = _chunk = _hwm = NULL
+    return copy;
+  }
+
+Matcher::match() calls it as
+
+  C->node_arena()->move_contents(C->old_arena());
+
+so node_arena is left reset with _first == NULL.  Compile::~Compile() then
+destroys node_arena, Arena::~Arena() calls destruct_contents(), and
+
+  _first->chop();
+
+dereferences NULL.  destruct_contents() already tests _first for the
+UseMallocOnly path, so a NULL _first is an expected state here; the chop
+simply lacks the same guard.
+
+On the android server build this aborted VM startup every time: the first
+runtime stub (OptoRuntime::generate_stub, _new_instance_Java) runs the
+matcher, and the C2 compiler thread then died in
+
+  Arena::destruct_contents() <- Arena::~Arena() <- Compile::~Compile()
+
+with fault addr 0x0.  -Xint never runs the compiler, which is why it worked.
+
+Chop only when there is something to chop.  reset() still runs, so the
+empty arena keeps its invariants.
+
+diff --git a/hotspot/src/share/vm/memory/allocation.cpp b/hotspot/src/share/vm/memory/allocation.cpp
+index 3cd30a6..9bae580 100644
+--- a/hotspot/src/share/vm/memory/allocation.cpp
++++ b/hotspot/src/share/vm/memory/allocation.cpp
+@@ -521,7 +521,11 @@ void Arena::destruct_contents() {
+   // reset size before chop to avoid a rare racing condition
+   // that can have total arena memory exceed total chunk memory
+   set_size_in_bytes(0);
+-  _first->chop();
++  // move_contents() resets the arena it moves out of, so by the time the
++  // destructor runs _first can already be NULL; only chop what is left.
++  if (_first != NULL) {
++    _first->chop();
++  }
+   reset();
+ }
+ 

@@ -1,0 +1,99 @@
+aarch64: recognize three and four instruction constant sequences precisely
+The four-instruction movptr form must coexist with the older three-instruction
+forms used by narrow or legacy patch sites.  Identify MOVK words by their 64-bit
+form, shift slot, and destination register instead of only checking the opcode.
+Use the same predicate for patching and decoding, and return the actual number
+of instructions so relocation callers invalidate the complete modified range.
+
+Apply after 0020.  This corrects the previous conditional handling; it does not
+change the four-instruction producer in 0019.
+
+diff --git a/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp b/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp
+--- a/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp
++++ b/hotspot/src/cpu/aarch64/vm/macroAssembler_aarch64.cpp
+@@ -70,6 +70,14 @@
+ 
+ #define BIND(label) bind(label); BLOCK_COMMENT(#label ":")
+ 
++static bool is_movk64(address insn_addr, unsigned hw, unsigned rd) {
++  unsigned insn = *(unsigned*)insn_addr;
++  return Instruction_aarch64::extract(insn, 31, 31) == 1 &&
++         Instruction_aarch64::extract(insn, 30, 23) == 0b11100101 &&
++         Instruction_aarch64::extract(insn, 22, 21) == hw &&
++         Instruction_aarch64::extract(insn, 4, 0) == rd;
++}
++
+ // Patch any kind of instruction; there may be several instructions.
+ // Return the total length (in bytes) of the instructions.
+ int MacroAssembler::pd_patch_instruction_size(address branch, address target) {
+@@ -153,15 +161,19 @@
+   } else if (Instruction_aarch64::extract(insn, 31, 21) == 0b11010010100) {
+     u_int64_t dest = (u_int64_t)target;
+     // Move wide constant
+-    assert(nativeInstruction_at(branch+4)->is_movk(), "wrong insns in patch");
+-    assert(nativeInstruction_at(branch+8)->is_movk(), "wrong insns in patch");
+-    assert(nativeInstruction_at(branch+12)->is_movk(), "wrong insns in patch");
++    unsigned rd = Instruction_aarch64::extract(insn, 4, 0);
++    assert(is_movk64(branch+4, 1, rd), "wrong insns in patch");
++    assert(is_movk64(branch+8, 2, rd), "wrong insns in patch");
+     Instruction_aarch64::patch(branch, 20, 5, dest & 0xffff);
+     Instruction_aarch64::patch(branch+4, 20, 5, (dest >>= 16) & 0xffff);
+     Instruction_aarch64::patch(branch+8, 20, 5, (dest >>= 16) & 0xffff);
+-    Instruction_aarch64::patch(branch+12, 20, 5, (dest >>= 16) & 0xffff);
++    if (is_movk64(branch+12, 3, rd)) {
++      Instruction_aarch64::patch(branch+12, 20, 5, (dest >>= 16) & 0xffff);
++      instructions = 4;
++    } else {
++      instructions = 3;
++    }
+     assert(target_addr_for_insn(branch) == target, "should be");
+-    instructions = 4;
+   } else if (Instruction_aarch64::extract(insn, 31, 22) == 0b1011100101 &&
+              Instruction_aarch64::extract(insn, 4, 0) == 0b11111) {
+     // nothing to do
+@@ -188,12 +200,19 @@
+     instructions = 2;
+   } else {
+     // Move wide OOP
+-    assert(nativeInstruction_at(insn_addr+8)->is_movk(), "wrong insns in patch");
++    unsigned rd = Instruction_aarch64::extract(insn, 4, 0);
++    assert(is_movk64(insn_addr+4, 1, rd), "wrong insns in patch");
++    assert(is_movk64(insn_addr+8, 2, rd), "wrong insns in patch");
+     uintptr_t dest = (uintptr_t)o;
+     Instruction_aarch64::patch(insn_addr, 20, 5, dest & 0xffff);
+     Instruction_aarch64::patch(insn_addr+4, 20, 5, (dest >>= 16) & 0xffff);
+     Instruction_aarch64::patch(insn_addr+8, 20, 5, (dest >>= 16) & 0xffff);
+-    instructions = 3;
++    if (is_movk64(insn_addr+12, 3, rd)) {
++      Instruction_aarch64::patch(insn_addr+12, 20, 5, (dest >>= 16) & 0xffff);
++      instructions = 4;
++    } else {
++      instructions = 3;
++    }
+   }
+   return instructions * NativeInstruction::instruction_size;
+ }
+@@ -268,13 +287,16 @@
+   } else if (Instruction_aarch64::extract(insn, 31, 23) == 0b110100101) {
+     u_int32_t *insns = (u_int32_t *)insn_addr;
+     // Move wide constant: movz followed by movk slots.  See movptr().
+-    assert(nativeInstruction_at(insns+1)->is_movk(), "wrong insns in patch");
+-    assert(nativeInstruction_at(insns+2)->is_movk(), "wrong insns in patch");
+-    assert(nativeInstruction_at(insns+3)->is_movk(), "wrong insns in patch");
+-    return address(u_int64_t(Instruction_aarch64::extract(insns[0], 20, 5))
+-                   + (u_int64_t(Instruction_aarch64::extract(insns[1], 20, 5)) << 16)
+-                   + (u_int64_t(Instruction_aarch64::extract(insns[2], 20, 5)) << 32)
+-                   + (u_int64_t(Instruction_aarch64::extract(insns[3], 20, 5)) << 48));
++    unsigned rd = Instruction_aarch64::extract(insns[0], 4, 0);
++    assert(is_movk64((address)(insns+1), 1, rd), "wrong insns in patch");
++    assert(is_movk64((address)(insns+2), 2, rd), "wrong insns in patch");
++    u_int64_t value = u_int64_t(Instruction_aarch64::extract(insns[0], 20, 5))
++                    + (u_int64_t(Instruction_aarch64::extract(insns[1], 20, 5)) << 16)
++                    + (u_int64_t(Instruction_aarch64::extract(insns[2], 20, 5)) << 32);
++    if (is_movk64((address)(insns+3), 3, rd)) {
++      value += (u_int64_t(Instruction_aarch64::extract(insns[3], 20, 5)) << 48);
++    }
++    return address(value);
+   } else if (Instruction_aarch64::extract(insn, 31, 22) == 0b1011100101 &&
+              Instruction_aarch64::extract(insn, 4, 0) == 0b11111) {
+     return 0;
